@@ -16,7 +16,8 @@
     "test:proxy": "tsx src/test/proxy-flow.ts",
     "telegram:setup": "tsx src/telegram-setup.ts",
     "anchor": "tsx src/proxy/anchor-now.ts",
-    "demo:tamper": "tsx src/demo/tamper.ts"
+    "demo:tamper": "tsx src/demo/tamper.ts",
+    "export:datev": "tsx src/proxy/export-datev.ts"
   },
   "dependencies": {
     "@bsv/sdk": "^3.2.1",

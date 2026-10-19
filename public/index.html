@@ -27,7 +27,9 @@
   .pill.warn { background: var(--warn-bg); color: var(--warn); }
   .h2row { display: flex; justify-content: space-between; align-items: center; }
   button { font: inherit; font-size: 13px; font-weight: 600; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--text); cursor: pointer; }
-  button:hover { border-color: var(--accent); color: var(--accent); } button:disabled { opacity: .5; cursor: wait; }
+  button:hover, .btn:hover { border-color: var(--accent); color: var(--accent); text-decoration: none; }
+  .btn { font-size: 13px; font-weight: 600; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--text); }
+  .actions { display: flex; gap: 8px; } button:disabled { opacity: .5; cursor: wait; }
   .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
   .kpi .v { font-size: 28px; font-weight: 650; font-variant-numeric: tabular-nums; }
@@ -85,7 +87,9 @@
     <div id="anchors-empty" class="empty">No anchor yet. The log is anchored automatically every few entries.</div>
   </section>
 
-  <h2>Activity</h2>
+  <div class="h2row"><h2>Activity</h2>
+    <span class="actions"><a class="btn" href="/v1/export/statement" target="_blank">Monthly statement</a><a class="btn" href="/v1/export/datev">Export DATEV</a></span>
+  </div>
   <section class="card table-wrap">
     <table>
       <thead><tr><th>Time</th><th>Agent</th><th>Service</th><th class="num">Amount</th><th>Decision</th><th>Details</th><th>Proof</th></tr></thead>

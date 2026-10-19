@@ -1,0 +1,9 @@
+{
+  "_note": "Exemples pour le plan comptable SKR03. C'est le conseiller fiscal (Steuerberater) de l'entreprise qui choisit les vrais comptes.",
+  "companyName": "Demo GmbH",
+  "consultantNumber": 1001,
+  "clientNumber": 1,
+  "chartOfAccounts": "03",
+  "expenseAccount": "4900",
+  "walletAccount": "1360"
+}
