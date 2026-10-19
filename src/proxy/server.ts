@@ -54,10 +54,15 @@ export function createProxy(
     console.log(`⚓ Audit log anchored on BSV up to entry #${a.seq} — https://test.whatsonchain.com/tx/${txid}`)
     return a
   })
+  let anchorInProgress = false // évite de lancer un 2e ancrage pendant qu'un ancrage est déjà en cours
   const maybeAnchor = async () => {
+    if (anchorInProgress) return
     const lastSeq = (await ledger.all()).at(-1)?.seq ?? 0
     if (lastSeq - (anchorLog.last()?.seq ?? 0) >= ANCHOR_EVERY) {
-      anchorNow().catch(e => console.error('⚠ Anchor failed:', (e as Error).message))
+      anchorInProgress = true
+      anchorNow()
+        .catch(e => console.error('⚠ Anchor failed:', (e as Error).message))
+        .finally(() => { anchorInProgress = false })
     }
   }
   const record = async (e: Parameters<typeof ledger.record>[0]) => { await ledger.record(e); void maybeAnchor() }
