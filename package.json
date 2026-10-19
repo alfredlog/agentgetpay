@@ -1,0 +1,32 @@
+{
+  "name": "agentpay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "wallet": "tsx src/create-wallet.ts",
+    "balance": "tsx src/balance.ts",
+    "send": "tsx src/send-test.ts",
+    "seller": "tsx src/seller/server.ts",
+    "agent": "tsx src/agent/demo.ts",
+    "test:local": "tsx src/test/local-flow.ts",
+    "proxy": "tsx src/proxy/server.ts",
+    "agent:proxy": "tsx src/agent/via-proxy.ts",
+    "ledger:verify": "tsx src/proxy/verify-ledger.ts",
+    "test:proxy": "tsx src/test/proxy-flow.ts",
+    "telegram:setup": "tsx src/telegram-setup.ts",
+    "anchor": "tsx src/proxy/anchor-now.ts",
+    "demo:tamper": "tsx src/demo/tamper.ts"
+  },
+  "dependencies": {
+    "@bsv/sdk": "^3.2.1",
+    "dotenv": "^16.4.5",
+    "express": "^4.22.3"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.25",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
