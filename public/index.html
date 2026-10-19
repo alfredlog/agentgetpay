@@ -97,6 +97,12 @@
 <script>
 const eur = v => '€' + v.toFixed(2)
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+const when = ts => {
+  const d = new Date(ts)
+  return d.toDateString() === new Date().toDateString()
+    ? d.toLocaleTimeString()
+    : d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) + ', ' + d.toLocaleTimeString()
+}
 const label = { allow: 'Paid', deny: 'Blocked', needs_approval: 'Needs approval', error: 'Error' }
 let seen = 0
 
@@ -105,8 +111,7 @@ async function refresh() {
     const [ledger, stats, check] = await Promise.all(
       ['/v1/ledger', '/v1/stats', '/v1/ledger/verify-chain'].map(u => fetch(u).then(r => r.json())))
 
-    const today = new Date().toISOString().slice(0, 10)
-    const todays = ledger.filter(e => e.ts.startsWith(today))
+    const todays = ledger.filter(e => new Date(e.ts).toDateString() === new Date().toDateString())
     const paid = todays.filter(e => e.decision === 'allow')
     document.getElementById('k-spent').textContent = eur(paid.reduce((s, e) => s + e.amountEur, 0))
     document.getElementById('k-paid').textContent = paid.length
@@ -123,7 +128,7 @@ async function refresh() {
     document.getElementById('anchors-empty').style.display = stats.anchors.length ? 'none' : 'block'
     document.getElementById('anchors').innerHTML = [...stats.anchors].reverse().map(a => `<tr>
       <td>Entry #${a.seq}</td>
-      <td class="muted">${new Date(a.ts).toLocaleTimeString()}</td>
+      <td class="muted">${when(a.ts)}</td>
       <td class="muted"><code>${a.hash.slice(0, 16)}…</code></td>
       <td><a href="https://test.whatsonchain.com/tx/${a.txid}" target="_blank">${a.txid.slice(0, 10)}…</a></td></tr>`).join('')
 
@@ -145,7 +150,7 @@ async function refresh() {
       const details = e.approvedBy ? `Approved by ${esc(e.approvedBy)}` : esc(e.reason ?? '')
       const proof = e.txid ? `<a href="https://test.whatsonchain.com/tx/${e.txid}" target="_blank">${e.txid.slice(0, 10)}…</a>` : '<span class="muted">—</span>'
       return `<tr class="${e.seq > seen && seen ? 'new' : ''}">
-        <td class="muted">${new Date(e.ts).toLocaleTimeString()}</td>
+        <td class="muted">${when(e.ts)}</td>
         <td>${esc(e.agentId)}</td>
         <td>${esc(u.host + u.pathname)}</td>
         <td class="num">${eur(e.amountEur)}</td>
