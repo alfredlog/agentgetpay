@@ -143,6 +143,10 @@ Daily spending is rebuilt from the audit log when the proxy starts, so restartin
 - **The proxy only listens on this computer** (`127.0.0.1`). To open it to the network (for example for a teammate), set `PROXY_HOST=0.0.0.0` in `.env`: the dashboard and exports then require the admin password, and the demo keys (`dev-…`, published in this repo) stop working. Issue new keys on the admin page.
 - The seller listens on this computer too (`SELLER_HOST` to change it).
 
+## Deploy on a server
+
+`deploy/` contains a pm2 configuration, a Caddy block and a step-by-step guide: [deploy/DEPLOY.md](deploy/DEPLOY.md). Behind Caddy, set `PROXY_PUBLIC=true` so the proxy knows it is public even though it listens on `127.0.0.1`. With `DASHBOARD_PUBLIC_READ=true`, anyone can view the dashboard (useful for a public demo) while exports, anchoring and the admin page keep requiring the admin password.
+
 ## Scripts
 
 | Command | What it does |
