@@ -140,6 +140,8 @@ export function createProxy(
     } catch (err) {
       if (reserved) await budget.release(agent.id, reserved) // paiement échoué : on rend le budget
       const d = decision && decision.kind !== 'allow' ? decision : undefined
+      // "fetch failed" = le service n'a pas répondu du tout (par exemple : le vendeur n'est pas lancé)
+      if ((err as Error).message === 'fetch failed') (err as Error).message = `Service unreachable: ${new URL(url).host}`
       await record({
         agentId: agent.id, url, amountSats, amountEur: amountSats * EUR_PER_SAT, purpose,
         decision: d?.kind ?? 'error', reason: d?.reason ?? (err as Error).message
