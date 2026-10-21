@@ -54,6 +54,8 @@
   .b-allow { background: var(--ok-bg); color: var(--ok); }
   .b-deny, .b-error { background: var(--bad-bg); color: var(--bad); }
   .b-needs_approval { background: var(--warn-bg); color: var(--warn); }
+  .b-admin { background: var(--bar); color: var(--accent); }
+  .tag { margin-left: 8px; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; background: var(--bad-bg); color: var(--bad); }
   .muted { color: var(--muted); } a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
   .table-wrap { overflow-x: auto; padding: 0; }
   .empty { padding: 24px; text-align: center; color: var(--muted); }
@@ -64,7 +66,7 @@
 <main>
   <header>
     <h1>Agent Spend Control<small>Budgets, approvals and audit for autonomous AI agents · BSV testnet</small></h1>
-    <span id="chain" class="pill">Checking audit log…</span>
+    <span class="actions"><span id="chain" class="pill">Checking audit log…</span><a class="btn" href="/admin.html">Manage agents</a></span>
   </header>
 
   <section class="kpis">
@@ -107,7 +109,7 @@ const when = ts => {
     ? d.toLocaleTimeString()
     : d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) + ', ' + d.toLocaleTimeString()
 }
-const label = { allow: 'Paid', deny: 'Blocked', needs_approval: 'Needs approval', error: 'Error' }
+const label = { allow: 'Paid', deny: 'Blocked', needs_approval: 'Needs approval', error: 'Error', admin: 'Rule change' }
 let seen = 0
 
 async function refresh() {
@@ -144,7 +146,7 @@ async function refresh() {
     document.getElementById('agents').innerHTML = stats.agents.map(a => {
       const pct = a.budgetEur ? Math.min(100, a.spentEur / a.budgetEur * 100) : 0
       return `<div class="card agent">
-        <div class="top"><span class="name">${esc(a.agentId)}</span><span class="amt">${eur(a.spentEur)} / ${eur(a.budgetEur)} today</span></div>
+        <div class="top"><span class="name">${esc(a.agentId)}${a.active === false ? '<span class="tag">Suspended</span>' : ''}</span><span class="amt">${eur(a.spentEur)} / ${eur(a.budgetEur)} today</span></div>
         <div class="bar ${pct >= 100 ? 'full' : ''}"><div style="width:${pct}%"></div></div>
         <div class="rules">Max ${eur(a.maxPerPaymentEur)} per payment · approval above ${eur(a.approvalAboveEur)} · ${a.allowedDomains.map(esc).join(', ')}</div>
       </div>`
@@ -153,13 +155,15 @@ async function refresh() {
     document.getElementById('empty').style.display = ledger.length ? 'none' : 'block'
     document.getElementById('rows').innerHTML = [...ledger].reverse().slice(0, 50).map(e => {
       const u = new URL(e.url)
-      const details = e.approvedBy ? `Approved by ${esc(e.approvedBy)}` : esc(e.reason ?? '')
+      const isAdmin = e.decision === 'admin'
+      const details = isAdmin ? `${esc(e.reason)} · by ${esc(e.approvedBy)}`
+        : e.approvedBy ? `Approved by ${esc(e.approvedBy)}` : esc(e.reason ?? '')
       const proof = e.txid ? `<a href="https://test.whatsonchain.com/tx/${e.txid}" target="_blank">${e.txid.slice(0, 10)}…</a>` : '<span class="muted">—</span>'
       return `<tr class="${e.seq > seen && seen ? 'new' : ''}">
         <td class="muted">${when(e.ts)}</td>
         <td>${esc(e.agentId)}</td>
-        <td>${esc(u.host + u.pathname)}</td>
-        <td class="num">${eur(e.amountEur)}</td>
+        <td>${isAdmin ? '<span class="muted">Settings</span>' : esc(u.host + u.pathname)}</td>
+        <td class="num">${isAdmin ? '<span class="muted">—</span>' : eur(e.amountEur)}</td>
         <td><span class="badge b-${e.decision}">${label[e.decision] ?? e.decision}</span></td>
         <td class="muted">${details}</td>
         <td>${proof}</td></tr>`
