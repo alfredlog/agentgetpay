@@ -17,6 +17,7 @@ import { Mutex } from '../shared/mutex.js'
 import { DatevExporter, loadAccountingConfig, monthlyStatementHtml } from './accounting.js'
 import { AgentRegistry, validateRules, validAgentId } from './registry.js'
 import type { Broadcaster } from '@bsv/sdk'
+import { decode, PaymentRequired } from '../shared/x402.js'
 
 // Testnet : les coins n'ont pas de valeur, on fixe un taux fictif pour des montants lisibles.
 // Mainnet : ce taux viendra d'une API de cours en temps réel.
@@ -113,15 +114,37 @@ export function createProxy(
   let pendingSeq = 0
 
   // L'agent s'identifie avec sa clé d'API (jamais avec une clé de portefeuille)
-  app.post('/v1/fetch', async (req, res) => {
+  const authAgent = (req: express.Request, res: express.Response) => {
     const agent = registry.authenticate(req.get('Authorization'))
-    if (!agent) return res.status(401).json({ error: 'Unknown agent' })
+    if (!agent) { res.status(401).json({ error: 'Unknown agent' }); return undefined }
     // Les clés de démo (dev-…) sont publiques dans le dépôt : interdites dès que le proxy est ouvert au réseau
     if (EXPOSED && agent.apiKey && !agent.keyHash) {
-      return res.status(401).json({ error: 'Demo API keys are disabled when the proxy is open to the network. Issue a new key on the admin page.' })
+      res.status(401).json({ error: 'Demo API keys are disabled when the proxy is open to the network. Issue a new key on the admin page.' })
+      return undefined
     }
+    return agent
+  }
 
-    const { url, method = 'GET', body, purpose } = req.body ?? {}
+  // L'agent consulte SES règles, son budget restant et ses dernières opérations (rien sur les autres agents)
+  app.get('/v1/me', async (req, res) => {
+    const agent = authAgent(req, res)
+    if (!agent) return
+    const rules = registry.rulesFor(agent.id)
+    const spentEur = (await budget.spentToday(agent.id)) * EUR_PER_SAT
+    const recent = (await ledger.all()).filter(e => e.agentId === agent.id && e.decision !== 'admin').slice(-10).reverse()
+      .map(e => ({ time: e.ts, url: e.url, amountEur: e.amountEur, decision: e.decision, reason: e.reason, approvedBy: e.approvedBy, txid: e.txid }))
+    res.json({
+      agentId: agent.id, active: registry.isActive(agent.id), rules, spentEur,
+      remainingEur: rules ? Math.max(0, Math.round((rules.daily_budget_eur - spentEur) * 100) / 100) : 0,
+      recent
+    })
+  })
+
+  app.post('/v1/fetch', async (req, res) => {
+    const agent = authAgent(req, res)
+    if (!agent) return
+
+    const { url, method = 'GET', body, purpose, dryRun } = req.body ?? {}
     if (!url) return res.status(400).json({ error: 'Missing url' })
 
     // Contrôles AVANT tout appel réseau, que le service soit payant ou gratuit
@@ -133,6 +156,25 @@ export function createProxy(
     if (!registry.isActive(agent.id)) return refuse('Agent suspended by an administrator')
     const target = checkTarget(url, registry.rulesFor(agent.id)?.allowed_domains)
     if (target) return refuse(target)
+
+    // Devis : demande le prix sans payer (la requête est envoyée sans contenu, rien n'est enregistré)
+    if (dryRun) {
+      try {
+        const r = await fetch(url, { method, redirect: 'manual' })
+        if (r.status !== 402) return res.json({ paymentRequired: false, status: r.status })
+        const offer = decode<PaymentRequired>(r.headers.get('PAYMENT-REQUIRED') ?? '')
+        const sats = Number(offer.accepts?.[0]?.amount)
+        if (!Number.isFinite(sats)) return res.status(502).json({ error: 'The service returned an unreadable price' })
+        const amountEur = sats * EUR_PER_SAT
+        const d = await policy.evaluate({ agentId: agent.id, url, amountSats: sats, amountEur, purpose })
+        return res.json({
+          paymentRequired: true, priceSats: sats, priceEur: amountEur, description: offer.resource?.description,
+          decision: d.kind, reason: d.kind === 'allow' ? undefined : d.reason
+        })
+      } catch (e) {
+        return res.status(502).json({ error: (e as Error).message === 'fetch failed' ? `Service unreachable: ${new URL(url).host}` : (e as Error).message })
+      }
+    }
 
     let decision: Decision | undefined
     let approvedBy: string | undefined

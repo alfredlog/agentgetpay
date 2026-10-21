@@ -4,6 +4,7 @@ Companies want AI agents that can pay for APIs and data on their own, but no fin
 
 - **Agents never hold keys.** They call the payment proxy with an API key; the proxy holds the wallet.
 - **Every payment is checked before it is signed:** daily budget, max per payment, allowed domains.
+- **Works with any AI assistant** through an MCP server: the assistant decides what to buy, the company's rules decide what gets paid.
 - **Finance manages each agent** from an admin page: budgets, limits, suspension, API keys.
 - **A human approves large payments** from their phone (Telegram), and their name is recorded.
 - **Finance gets a DATEV export** and a monthly statement, one booking per payment.
@@ -80,6 +81,30 @@ npm run agent:pdf -- invoice.pdf contract.pdf  # or with your own files
 
 Expected: the compression is paid automatically, the merge waits for your approval on Telegram, and a damaged file is refused by PDF Libre without being charged. Results are saved in `data/out/`.
 
+### Use it from any AI assistant (MCP)
+
+AgentGetPay ships an [MCP](https://modelcontextprotocol.io) server, so any MCP-compatible assistant or agent framework (Claude, ChatGPT, Copilot, Cursor, Gemini CLI, OpenAI Agents SDK, LangChain…) can buy services within the company's rules. The assistant never holds a wallet key: every call goes through the proxy.
+
+| Tool | What it does |
+| --- | --- |
+| `check_budget` | The agent's rules, what it can still spend today, its last 10 operations |
+| `get_price` | Asks a service for its price **without paying**, and says whether the rules would allow, refuse or require approval |
+| `pay_and_fetch` | Calls a service; if it asks for payment, the proxy checks the rules, may ask a human, pays and returns the result. A `purpose` is required for the audit log |
+| `list_workspace_files` | Files the agent can send, and files it received |
+
+**Local mode (stdio)**, for desktop assistants:
+
+```bash
+npm run mcp:config              # prints the configuration to paste, with the exact paths of this computer
+npm run mcp:config -- <api-key> # same, for an agent whose key was issued on the admin page
+```
+
+**HTTP mode**, for several agents sharing one server: `npm run mcp:http`, then connect to `http://127.0.0.1:5070/mcp` with `Authorization: Bearer <agent API key>`. Each client acts as its own agent, with its own budget.
+
+**Files:** the assistant only sees the `workspace/` folder. In a request body, `{"$file": "invoice.pdf"}` is replaced by the file's content; files received (for example a compressed PDF) are saved in `workspace/out/`. Paths outside the folder and symbolic links pointing outside are refused.
+
+Payments above the approval threshold wait up to 2 minutes for the human; some assistants stop waiting for a tool earlier.
+
 ### Prove the audit log on the blockchain
 
 ```bash
@@ -135,6 +160,8 @@ Daily spending is rebuilt from the audit log when the proxy starts, so restartin
 | `npm run ledger:verify` | Verify the audit log against the blockchain |
 | `npm run demo:tamper` | Tamper with the log (demo only) |
 | `npm run export:datev` | Export the month's payments as a DATEV file |
+| `npm run mcp` / `npm run mcp:http` | MCP server for AI assistants (local / HTTP on port 5070) |
+| `npm run mcp:config` | Print the MCP configuration to paste into an assistant |
 | `npm run test:local`, `npm run test:proxy` | Offline tests with a fake wallet |
 
 Code comments are in French.
