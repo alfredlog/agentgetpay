@@ -1,6 +1,6 @@
 # Deploy on a VPS (pm2 + Caddy)
 
-Public demo at `https://agentgetpay.pdf-libre.de` (change the name everywhere if you use another one).
+Public demo at `https://agentpay.pdf-libre.de` (change the name everywhere if you use another one).
 The proxy and the MCP server only listen on `127.0.0.1`; Caddy is the only thing exposed, with HTTPS.
 
 ## 1. DNS
@@ -50,16 +50,16 @@ sudo systemctl reload caddy                         # apply it; the HTTPS certif
 
 ## 6. Agents
 
-Demo keys (`dev-…`) are refused in public mode. Open `https://agentgetpay.pdf-libre.de/admin.html`, sign in with the admin password, and click **New API key** for each agent you use.
+Demo keys (`dev-…`) are refused in public mode. Open `https://agentpay.pdf-libre.de/admin.html`, sign in with the admin password, and click **New API key** for each agent you use.
 
 ## 7. Check
 
 ```bash
-curl -s https://agentgetpay.pdf-libre.de/v1/stats | head -c 200     # dashboard data (public read)
-curl -s -o /dev/null -w "%{http_code}\n" https://agentgetpay.pdf-libre.de/v1/export/datev   # 401: protected
+curl -s https://agentpay.pdf-libre.de/v1/stats | head -c 200     # dashboard data (public read)
+curl -s -o /dev/null -w "%{http_code}\n" https://agentpay.pdf-libre.de/v1/export/datev   # 401: protected
 ```
 
-MCP clients connect to `https://agentgetpay.pdf-libre.de/mcp` with `Authorization: Bearer <agent API key>`.
+MCP clients connect to `https://agentpay.pdf-libre.de/mcp` with `Authorization: Bearer <agent API key>`.
 
 ## Update later
 

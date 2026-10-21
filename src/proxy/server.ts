@@ -29,7 +29,7 @@ const HOST = process.env.PROXY_HOST ?? '127.0.0.1'
 const truthy = (v: string | undefined) => ['1', 'true', 'yes', 'on'].includes(String(v ?? '').trim().toLowerCase())
 // Derrière un serveur web (Caddy, nginx), le proxy écoute sur 127.0.0.1 mais il est PUBLIC : PROXY_PUBLIC=true le dit.
 const EXPOSED = !['127.0.0.1', 'localhost', '::1'].includes(HOST) || truthy(process.env.PROXY_PUBLIC)
-// Adresse publique du proxy (ex. agentgetpay.pdf-libre.de) : un agent ne doit jamais pouvoir l'appeler
+// Adresse publique du proxy (ex. agentpay.pdf-libre.de) : un agent ne doit jamais pouvoir l'appeler
 const PUBLIC_HOST = (process.env.PROXY_PUBLIC_HOST ?? '').trim().toLowerCase()
 // Démo publique : le tableau de bord se consulte sans mot de passe (exports, ancrage et administration restent protégés)
 const PUBLIC_READ = truthy(process.env.DASHBOARD_PUBLIC_READ)
