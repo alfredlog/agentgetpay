@@ -16,6 +16,10 @@ export class JsonlLedger implements Ledger {
   }
 
   async all(): Promise<LedgerEntry[]> {
+    return this.allSync()
+  }
+
+  allSync(): LedgerEntry[] {
     if (!existsSync(this.path)) return []
     return readFileSync(this.path, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l))
   }

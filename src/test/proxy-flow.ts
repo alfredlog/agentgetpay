@@ -19,4 +19,4 @@ const { createProxy } = await import('../proxy/server.js')
 createProxy(
   { async findUtxo() { return { sourceTransaction: funding, outputIndex: 0, satoshis: 100000 } } },
   { broadcaster, fetchTxHex: async txid => chain.get(txid) ?? Promise.reject(new Error('unknown tx')) }
-).listen(5050, () => console.log('Test proxy ready (fake wallet, fake chain)'))
+).listen(5050, '127.0.0.1', () => console.log('Test proxy ready (fake wallet, fake chain)'))

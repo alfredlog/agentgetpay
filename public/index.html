@@ -90,7 +90,7 @@
   </section>
 
   <div class="h2row"><h2>Activity</h2>
-    <span class="actions"><a class="btn" href="/v1/export/statement" target="_blank">Monthly statement</a><a class="btn" href="/v1/export/datev">Export DATEV</a></span>
+    <span class="actions"><button id="btn-statement">Monthly statement</button><button id="btn-datev">Export DATEV</button></span>
   </div>
   <section class="card table-wrap">
     <table>
@@ -111,11 +111,46 @@ const when = ts => {
 }
 const label = { allow: 'Paid', deny: 'Blocked', needs_approval: 'Needs approval', error: 'Error', admin: 'Rule change' }
 let seen = 0
+// Une adresse refusée peut être invalide ("hello", "file://…") : ne jamais faire planter l'affichage
+const service = url => { try { const u = new URL(url); return u.host + u.pathname } catch { return String(url).slice(0, 60) } }
+const pathOf = url => { try { return new URL(url).pathname } catch { return String(url).slice(0, 60) } }
+
+// Si le proxy est ouvert au réseau, il faut le mot de passe admin (saisi sur la page d'administration)
+const adminToken = () => { try { return sessionStorage.getItem('agp-token') || '' } catch { return '' } }
+async function api(url, opts = {}) {
+  const res = await fetch(url, { ...opts, headers: { ...(opts.headers || {}), 'X-Admin-Token': adminToken() } })
+  if (res.status === 401) throw Object.assign(new Error('locked'), { locked: true })
+  return res
+}
+
+// Téléchargements avec le mot de passe (un simple lien ne peut pas l'envoyer)
+async function download(url, fallbackName, open) {
+  const win = open ? window.open('', '_blank') : null // ouvert tout de suite, sinon Safari bloque la fenêtre
+  try {
+    const res = await api(url)
+    const blob = await res.blob()
+    const link = URL.createObjectURL(blob)
+    if (win) { win.location.href = link } else {
+      const name = (res.headers.get('Content-Disposition') || '').match(/filename="([^"]+)"/)?.[1] || fallbackName
+      const a = Object.assign(document.createElement('a'), { href: link, download: name })
+      document.body.appendChild(a); a.click(); a.remove()
+    }
+    setTimeout(() => URL.revokeObjectURL(link), 60000)
+  } catch (e) { if (win) win.close(); if (e.locked) showLocked() }
+}
+document.getElementById('btn-datev').onclick = () => download('/v1/export/datev', 'datev.csv', false)
+document.getElementById('btn-statement').onclick = () => download('/v1/export/statement', 'statement.html', true)
+
+function showLocked() {
+  const chain = document.getElementById('chain')
+  chain.className = 'pill warn'
+  chain.innerHTML = 'Locked: <a href="/admin.html">sign in on the admin page</a>'
+}
 
 async function refresh() {
   try {
     const [ledger, stats, check] = await Promise.all(
-      ['/v1/ledger', '/v1/stats', '/v1/ledger/verify-chain'].map(u => fetch(u).then(r => r.json())))
+      ['/v1/ledger', '/v1/stats', '/v1/ledger/verify-chain'].map(u => api(u).then(r => r.json())))
 
     const todays = ledger.filter(e => new Date(e.ts).toDateString() === new Date().toDateString())
     const paid = todays.filter(e => e.decision === 'allow')
@@ -141,7 +176,7 @@ async function refresh() {
       <td><a href="https://test.whatsonchain.com/tx/${a.txid}" target="_blank">${a.txid.slice(0, 10)}…</a></td></tr>`).join('')
 
     document.getElementById('pending').innerHTML = stats.pending.map(p =>
-      `<div class="pending">⏳ <b>${esc(p.agentId)}</b> is waiting for approval: ${eur(p.amountEur)} to ${esc(new URL(p.url).pathname)} — “${esc(p.purpose)}”</div>`).join('')
+      `<div class="pending">⏳ <b>${esc(p.agentId)}</b> is waiting for approval: ${eur(p.amountEur)} to ${esc(pathOf(p.url))} — “${esc(p.purpose)}”</div>`).join('')
 
     document.getElementById('agents').innerHTML = stats.agents.map(a => {
       const pct = a.budgetEur ? Math.min(100, a.spentEur / a.budgetEur * 100) : 0
@@ -154,7 +189,6 @@ async function refresh() {
 
     document.getElementById('empty').style.display = ledger.length ? 'none' : 'block'
     document.getElementById('rows').innerHTML = [...ledger].reverse().slice(0, 50).map(e => {
-      const u = new URL(e.url)
       const isAdmin = e.decision === 'admin'
       const details = isAdmin ? `${esc(e.reason)} · by ${esc(e.approvedBy)}`
         : e.approvedBy ? `Approved by ${esc(e.approvedBy)}` : esc(e.reason ?? '')
@@ -162,7 +196,7 @@ async function refresh() {
       return `<tr class="${e.seq > seen && seen ? 'new' : ''}">
         <td class="muted">${when(e.ts)}</td>
         <td>${esc(e.agentId)}</td>
-        <td>${isAdmin ? '<span class="muted">Settings</span>' : esc(u.host + u.pathname)}</td>
+        <td>${isAdmin ? '<span class="muted">Settings</span>' : esc(service(e.url))}</td>
         <td class="num">${isAdmin ? '<span class="muted">—</span>' : eur(e.amountEur)}</td>
         <td><span class="badge b-${e.decision}">${label[e.decision] ?? e.decision}</span></td>
         <td class="muted">${details}</td>
@@ -170,6 +204,7 @@ async function refresh() {
     }).join('')
     seen = Math.max(seen, ...ledger.map(e => e.seq), 0)
   } catch (err) {
+    if (err.locked) return showLocked()
     document.getElementById('chain').className = 'pill bad'
     document.getElementById('chain').textContent = 'Proxy unreachable'
   }
@@ -178,7 +213,7 @@ async function anchorNow() {
   const b = document.getElementById('anchor-btn')
   b.disabled = true; b.textContent = 'Anchoring…'
   try {
-    const r = await fetch('/v1/anchor', { method: 'POST' }).then(r => r.json())
+    const r = await api('/v1/anchor', { method: 'POST' }).then(r => r.json()).catch(e => { if (e.locked) showLocked(); return {} })
     if (r.error) { b.textContent = 'Anchor failed'; console.error(r.error); await new Promise(r => setTimeout(r, 2000)) }
   } finally { b.disabled = false; b.textContent = 'Anchor now'; refresh() }
 }

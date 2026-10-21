@@ -22,6 +22,10 @@ import type { Broadcaster } from '@bsv/sdk'
 // Mainnet : ce taux viendra d'une API de cours en temps réel.
 const EUR_PER_SAT = Number(process.env.EUR_PER_SAT ?? 0.01)
 const PORT = Number(process.env.PROXY_PORT ?? 5050)
+// Par défaut, le proxy n'écoute que sur cet ordinateur (127.0.0.1) : personne d'autre sur le réseau ne le voit.
+// PROXY_HOST=0.0.0.0 l'ouvre au réseau ; il faut alors le mot de passe admin partout, et les clés de démo sont refusées.
+const HOST = process.env.PROXY_HOST ?? '127.0.0.1'
+const EXPOSED = !['127.0.0.1', 'localhost', '::1'].includes(HOST)
 
 const registry = new AgentRegistry()
 const budget = new MemoryBudgetStore()
@@ -36,6 +40,7 @@ if (ADMIN_TOKEN.length < 12) {
 }
 const keys = new EnvKeyStore(process.env.BSV_WIF!)
 const ledger = new JsonlLedger('data/ledger.jsonl')
+budget.restoreFrom(ledger.allSync()) // les dépenses du jour survivent à un redémarrage
 const anchorLog = new AnchorLog('data/anchors.jsonl')
 const ANCHOR_EVERY = Number(process.env.ANCHOR_EVERY ?? 5) // ancrer sur BSV toutes les N entrées du journal
 
@@ -43,6 +48,27 @@ const ANCHOR_EVERY = Number(process.env.ANCHOR_EVERY ?? 5) // ancrer sur BSV tou
 const approvals: ApprovalChannel = process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID
   ? new TelegramApprovalChannel(process.env.TELEGRAM_BOT_TOKEN, process.env.TELEGRAM_CHAT_ID)
   : new AutoApprovalChannel(process.env.APPROVAL_AUTO === 'approved' ? 'approved' : 'rejected')
+
+// Mot de passe administrateur (comparaison en temps constant)
+function requireAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const given = Buffer.from(String(req.get('X-Admin-Token') ?? ''))
+  const expected = Buffer.from(ADMIN_TOKEN)
+  if (given.length !== expected.length || !timingSafeEqual(given, expected)) return res.status(401).json({ error: 'Wrong admin password' })
+  next()
+}
+
+// Vérifie l'adresse demandée par un agent. Renvoie la raison du refus, ou undefined si c'est autorisé.
+function checkTarget(url: unknown, allowed: string[] | undefined): string | undefined {
+  let u: URL
+  try { u = new URL(String(url)) } catch { return 'Invalid URL' }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return `Protocol not allowed: ${u.protocol}`
+  if (!allowed) return 'No rules for this agent'
+  if (!allowed.includes(u.hostname)) return `Domain not allowed: ${u.hostname}`
+  // Le proxy lui-même (son journal, son administration) n'est jamais une cible pour un agent
+  const self = ['localhost', '127.0.0.1', '[::1]', '0.0.0.0'].includes(u.hostname) && Number(u.port || (u.protocol === 'https:' ? 443 : 80)) === PORT
+  if (self) return 'The payment proxy itself cannot be called by an agent'
+  return undefined
+}
 
 export function createProxy(
   inner: UtxoProvider = new WhatsOnChainUtxoProvider(),
@@ -90,17 +116,23 @@ export function createProxy(
   app.post('/v1/fetch', async (req, res) => {
     const agent = registry.authenticate(req.get('Authorization'))
     if (!agent) return res.status(401).json({ error: 'Unknown agent' })
+    // Les clés de démo (dev-…) sont publiques dans le dépôt : interdites dès que le proxy est ouvert au réseau
+    if (EXPOSED && agent.apiKey && !agent.keyHash) {
+      return res.status(401).json({ error: 'Demo API keys are disabled when the proxy is open to the network. Issue a new key on the admin page.' })
+    }
 
     const { url, method = 'GET', body, purpose } = req.body ?? {}
     if (!url) return res.status(400).json({ error: 'Missing url' })
 
-    // Agent suspendu par un administrateur : refusé et enregistré dans le journal
-    if (!registry.isActive(agent.id)) {
-      const reason = 'Agent suspended by an administrator'
-      await record({ agentId: agent.id, url, amountSats: 0, amountEur: 0, purpose, decision: 'deny', reason })
+    // Contrôles AVANT tout appel réseau, que le service soit payant ou gratuit
+    const refuse = async (reason: string) => {
+      await record({ agentId: agent.id, url: String(url).slice(0, 300), amountSats: 0, amountEur: 0, purpose, decision: 'deny', reason })
       console.log(`✘ ${agent.id} → ${url} : ${reason}`)
       return res.status(403).json({ decision: 'deny', reason })
     }
+    if (!registry.isActive(agent.id)) return refuse('Agent suspended by an administrator')
+    const target = checkTarget(url, registry.rulesFor(agent.id)?.allowed_domains)
+    if (target) return refuse(target)
 
     let decision: Decision | undefined
     let approvedBy: string | undefined
@@ -111,7 +143,8 @@ export function createProxy(
       const { response, paid } = await payFetch(url, {
         method,
         body: body ? JSON.stringify(body) : undefined,
-        headers: body ? { 'Content-Type': 'application/json' } : undefined
+        headers: body ? { 'Content-Type': 'application/json' } : undefined,
+        redirect: 'manual' // ne jamais suivre une redirection : elle pourrait mener hors des domaines autorisés
       }, {
         address: keys.address(agent.id),
         unlocker: () => keys.unlocker(agent.id),
@@ -169,6 +202,11 @@ export function createProxy(
     }
   })
 
+  // Données du tableau de bord : protégées par le mot de passe admin si le proxy est ouvert au réseau
+  if (EXPOSED) {
+    app.use(['/v1/ledger', '/v1/stats', '/v1/export', '/v1/anchor'], requireAdmin)
+  }
+
   // Pour le tableau de bord
   app.get('/v1/ledger', async (_req, res) => res.json(await ledger.all()))
 
@@ -198,16 +236,11 @@ export function createProxy(
 
   // ---- Administration : protégée par le mot de passe ADMIN_TOKEN ----
   const admin = express.Router()
-  admin.use((req, res, next) => {
-    const given = Buffer.from(String(req.get('X-Admin-Token') ?? ''))
-    const expected = Buffer.from(ADMIN_TOKEN)
-    if (given.length !== expected.length || !timingSafeEqual(given, expected)) return res.status(401).json({ error: 'Wrong admin password' })
-    next()
-  })
+  admin.use(requireAdmin)
   // Qui a fait la modification : nom saisi sur la page d'administration (pour le journal d'audit)
   const who = (req: express.Request) => String(req.get('X-Admin-Name') ?? '').trim().slice(0, 40) || 'admin'
-  const logChange = (req: express.Request, agentId: string, change: string) =>
-    record({ agentId, url: `admin://agents/${agentId}`, amountSats: 0, amountEur: 0, decision: 'admin', reason: change, approvedBy: who(req) })
+  const logChange = (req: express.Request, agentId: string, change: string, action?: string) =>
+    record({ agentId, url: `admin://agents/${agentId}`, amountSats: 0, amountEur: 0, decision: 'admin', reason: change, approvedBy: who(req), action })
   const describe = (before: ReturnType<typeof registry.rulesFor>, after: NonNullable<ReturnType<typeof registry.rulesFor>>) => {
     if (!before) return 'Rules created'
     const parts: string[] = []
@@ -256,7 +289,7 @@ export function createProxy(
     if (!registry.get(id)) return res.status(404).json({ error: 'Unknown agent' })
     const before = (await budget.spentToday(id)) * EUR_PER_SAT
     await budget.reset(id)
-    await logChange(req, id, `Today's spending reset (was ${fmt(before)})`)
+    await logChange(req, id, `Today's spending reset (was ${fmt(before)})`, 'budget_reset')
     res.json({ ok: true })
   })
 
@@ -305,5 +338,9 @@ export function createProxy(
 }
 
 if (process.argv[1]?.endsWith('server.ts')) {
-  createProxy().listen(PORT, () => console.log(`Payment proxy ready on http://localhost:${PORT} — dashboard: http://localhost:${PORT}`))
+  createProxy().listen(PORT, HOST, () => {
+    console.log(`Payment proxy ready on http://localhost:${PORT} — dashboard: http://localhost:${PORT}`)
+    if (EXPOSED) console.log(`⚠ Open to the network on ${HOST}:${PORT}: dashboard needs the admin password, demo API keys are disabled`)
+    else console.log('Only reachable from this computer (set PROXY_HOST=0.0.0.0 to open it to the network)')
+  })
 }
