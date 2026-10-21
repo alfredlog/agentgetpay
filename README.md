@@ -4,6 +4,7 @@ Companies want AI agents that can pay for APIs and data on their own, but no fin
 
 - **Agents never hold keys.** They call the payment proxy with an API key; the proxy holds the wallet.
 - **Every payment is checked before it is signed:** daily budget, max per payment, allowed domains.
+- **Finance manages each agent** from an admin page: budgets, limits, suspension, API keys.
 - **A human approves large payments** from their phone (Telegram), and their name is recorded.
 - **Finance gets a DATEV export** and a monthly statement, one booking per payment.
 - **Every decision is logged** in a hash-chained audit log, **anchored on the BSV blockchain** so anyone can prove it was never altered.
@@ -87,6 +88,14 @@ npm run ledger:verify   # check the log against the blockchain → AUDIT LOG INT
 npm run demo:tamper     # a "smart" attacker edits entry #2 and recomputes every hash
 npm run ledger:verify   # local chain looks fine, BSV anchor does not → AUDIT LOG TAMPERED
 ```
+
+### Manage agents (admin page)
+
+Open **http://localhost:5050/admin.html** (or **Manage agents** on the dashboard). Sign in with your name and the admin password: `ADMIN_TOKEN` in `.env`, created automatically the first time the proxy starts.
+
+For each agent you can change the daily budget, the maximum per payment, the approval threshold and the allowed domains, suspend or reactivate it, reset today's spending, and issue a new API key (the old one stops working). You can also create new agents. Changes apply immediately, without restarting the proxy.
+
+Every change is written to the audit log with the name of the person who made it, and sealed on BSV like the payments. New API keys are shown once and only their hash is stored.
 
 ### Accounting export (DATEV)
 

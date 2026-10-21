@@ -2,7 +2,8 @@
 // Pour chaque 402 : règles → réservation du budget → signature → paiement → journal.
 import 'dotenv/config'
 import express from 'express'
-import { readFileSync } from 'node:fs'
+import { appendFileSync } from 'node:fs'
+import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { payFetch } from '../agent/pay-fetch.js'
 import { WhatsOnChainUtxoProvider, UtxoProvider, ChainedUtxoProvider } from '../shared/utxo.js'
 import { JsonPolicyEngine, fmt } from './policy.js'
@@ -14,6 +15,7 @@ import { TelegramApprovalChannel, AutoApprovalChannel } from './approval.js'
 import { AnchorLog, BsvAnchorRail, verifyAgainstChain, cachedWocFetch, FetchTxHex, Anchor } from './anchor.js'
 import { Mutex } from '../shared/mutex.js'
 import { DatevExporter, loadAccountingConfig, monthlyStatementHtml } from './accounting.js'
+import { AgentRegistry, validateRules, validAgentId } from './registry.js'
 import type { Broadcaster } from '@bsv/sdk'
 
 // Testnet : les coins n'ont pas de valeur, on fixe un taux fictif pour des montants lisibles.
@@ -21,9 +23,17 @@ import type { Broadcaster } from '@bsv/sdk'
 const EUR_PER_SAT = Number(process.env.EUR_PER_SAT ?? 0.01)
 const PORT = Number(process.env.PROXY_PORT ?? 5050)
 
-const agents: { id: string; apiKey: string }[] = JSON.parse(readFileSync('config/agents.json', 'utf8'))
+const registry = new AgentRegistry()
 const budget = new MemoryBudgetStore()
-const policy = new JsonPolicyEngine('config/policies.json', budget, EUR_PER_SAT)
+const policy = new JsonPolicyEngine(registry, budget, EUR_PER_SAT)
+
+// Mot de passe de la page d'administration : créé automatiquement au premier démarrage
+let ADMIN_TOKEN = process.env.ADMIN_TOKEN ?? ''
+if (ADMIN_TOKEN.length < 12) {
+  ADMIN_TOKEN = randomBytes(18).toString('base64url')
+  appendFileSync('.env', `\nADMIN_TOKEN=${ADMIN_TOKEN}\n`)
+  console.log(`Admin password created and saved in .env: ${ADMIN_TOKEN}`)
+}
 const keys = new EnvKeyStore(process.env.BSV_WIF!)
 const ledger = new JsonlLedger('data/ledger.jsonl')
 const anchorLog = new AnchorLog('data/anchors.jsonl')
@@ -78,11 +88,19 @@ export function createProxy(
 
   // L'agent s'identifie avec sa clé d'API (jamais avec une clé de portefeuille)
   app.post('/v1/fetch', async (req, res) => {
-    const agent = agents.find(a => `Bearer ${a.apiKey}` === req.get('Authorization'))
+    const agent = registry.authenticate(req.get('Authorization'))
     if (!agent) return res.status(401).json({ error: 'Unknown agent' })
 
     const { url, method = 'GET', body, purpose } = req.body ?? {}
     if (!url) return res.status(400).json({ error: 'Missing url' })
+
+    // Agent suspendu par un administrateur : refusé et enregistré dans le journal
+    if (!registry.isActive(agent.id)) {
+      const reason = 'Agent suspended by an administrator'
+      await record({ agentId: agent.id, url, amountSats: 0, amountEur: 0, purpose, decision: 'deny', reason })
+      console.log(`✘ ${agent.id} → ${url} : ${reason}`)
+      return res.status(403).json({ decision: 'deny', reason })
+    }
 
     let decision: Decision | undefined
     let approvedBy: string | undefined
@@ -156,10 +174,11 @@ export function createProxy(
 
   // Résumé pour le tableau de bord : budget de chaque agent + validations en attente
   app.get('/v1/stats', async (_req, res) => {
-    const list = await Promise.all(agents.map(async a => {
+    const list = await Promise.all(registry.list().map(async a => {
       const r = policy.rulesFor(a.id)
       return {
         agentId: a.id,
+        active: a.active,
         spentEur: (await budget.spentToday(a.id)) * EUR_PER_SAT,
         budgetEur: r?.daily_budget_eur ?? 0,
         maxPerPaymentEur: r?.max_per_payment_eur ?? 0,
@@ -176,6 +195,91 @@ export function createProxy(
     try { res.json(await verifyAgainstChain(await ledger.all(), anchorLog.all(), fetchTxHex)) }
     catch (e) { res.status(502).json({ error: (e as Error).message }) }
   })
+
+  // ---- Administration : protégée par le mot de passe ADMIN_TOKEN ----
+  const admin = express.Router()
+  admin.use((req, res, next) => {
+    const given = Buffer.from(String(req.get('X-Admin-Token') ?? ''))
+    const expected = Buffer.from(ADMIN_TOKEN)
+    if (given.length !== expected.length || !timingSafeEqual(given, expected)) return res.status(401).json({ error: 'Wrong admin password' })
+    next()
+  })
+  // Qui a fait la modification : nom saisi sur la page d'administration (pour le journal d'audit)
+  const who = (req: express.Request) => String(req.get('X-Admin-Name') ?? '').trim().slice(0, 40) || 'admin'
+  const logChange = (req: express.Request, agentId: string, change: string) =>
+    record({ agentId, url: `admin://agents/${agentId}`, amountSats: 0, amountEur: 0, decision: 'admin', reason: change, approvedBy: who(req) })
+  const describe = (before: ReturnType<typeof registry.rulesFor>, after: NonNullable<ReturnType<typeof registry.rulesFor>>) => {
+    if (!before) return 'Rules created'
+    const parts: string[] = []
+    const money = (label: string, a: number, b: number) => { if (a !== b) parts.push(`${label} ${fmt(a)} → ${fmt(b)}`) }
+    money('Daily budget', before.daily_budget_eur, after.daily_budget_eur)
+    money('Max per payment', before.max_per_payment_eur, after.max_per_payment_eur)
+    money('Approval above', before.approval_above_eur, after.approval_above_eur)
+    if (before.allowed_domains.join(',') !== after.allowed_domains.join(',')) parts.push(`Domains: ${after.allowed_domains.join(', ')}`)
+    return parts.join(' · ')
+  }
+
+  admin.get('/agents', async (_req, res) => {
+    res.json(await Promise.all(registry.list().map(async a => ({
+      id: a.id, active: a.active, keyHint: a.keyHint ?? (a.apiKey ? a.apiKey.slice(-4) : undefined),
+      rules: registry.rulesFor(a.id), spentEur: (await budget.spentToday(a.id)) * EUR_PER_SAT
+    }))))
+  })
+
+  admin.put('/agents/:id', async (req, res) => {
+    const id = req.params.id
+    if (!registry.get(id)) return res.status(404).json({ error: 'Unknown agent' })
+    try {
+      const rules = validateRules(req.body?.rules)
+      const change = describe(registry.rulesFor(id), rules)
+      if (!change) return res.json({ ok: true, message: 'No change' })
+      registry.setRules(id, rules)
+      await logChange(req, id, change)
+      console.log(`⚙ ${who(req)} changed ${id}: ${change}`)
+      res.json({ ok: true, message: change })
+    } catch (e) { res.status(400).json({ error: (e as Error).message }) }
+  })
+
+  admin.post('/agents/:id/status', async (req, res) => {
+    const id = req.params.id
+    if (!registry.get(id)) return res.status(404).json({ error: 'Unknown agent' })
+    const active = req.body?.active === true
+    if (registry.isActive(id) === active) return res.json({ ok: true })
+    registry.setActive(id, active)
+    await logChange(req, id, active ? 'Agent reactivated' : 'Agent suspended')
+    console.log(`⚙ ${who(req)} ${active ? 'reactivated' : 'suspended'} ${id}`)
+    res.json({ ok: true })
+  })
+
+  admin.post('/agents/:id/reset-budget', async (req, res) => {
+    const id = req.params.id
+    if (!registry.get(id)) return res.status(404).json({ error: 'Unknown agent' })
+    const before = (await budget.spentToday(id)) * EUR_PER_SAT
+    await budget.reset(id)
+    await logChange(req, id, `Today's spending reset (was ${fmt(before)})`)
+    res.json({ ok: true })
+  })
+
+  admin.post('/agents/:id/key', async (req, res) => {
+    const id = req.params.id
+    if (!registry.get(id)) return res.status(404).json({ error: 'Unknown agent' })
+    const apiKey = registry.rotateKey(id)
+    await logChange(req, id, 'New API key issued, old key revoked')
+    res.json({ ok: true, apiKey })
+  })
+
+  admin.post('/agents', async (req, res) => {
+    const id = req.body?.id
+    if (!validAgentId(id)) return res.status(400).json({ error: 'Agent name: 3–32 characters, lowercase letters, digits and dashes' })
+    if (registry.get(id)) return res.status(409).json({ error: 'This agent already exists' })
+    try {
+      const rules = validateRules(req.body?.rules)
+      const apiKey = registry.create(id, rules)
+      await logChange(req, id, `Agent created · daily budget ${fmt(rules.daily_budget_eur)}`)
+      res.json({ ok: true, apiKey })
+    } catch (e) { res.status(400).json({ error: (e as Error).message }) }
+  })
+  app.use('/v1/admin', admin)
 
   // Export comptable du mois (par défaut : le mois en cours)
   const currentMonth = () => new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Berlin' }).slice(0, 7)

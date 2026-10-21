@@ -1,5 +1,4 @@
-// Moteur de règles simple : règles par agent dans config/policies.json.
-import { readFileSync } from 'node:fs'
+// Moteur de règles simple : règles par agent, lues dans le registre (config/policies.json).
 import { PolicyEngine, PaymentRequest, Decision, BudgetStore } from './types.js'
 
 export interface Rules {
@@ -10,18 +9,15 @@ export interface Rules {
 }
 
 export class JsonPolicyEngine implements PolicyEngine {
-  private rules: Record<string, Rules>
-
-  constructor(path: string, private budget: BudgetStore, private eurPerSat: number) {
-    this.rules = JSON.parse(readFileSync(path, 'utf8'))
-  }
+  // Les règles sont relues à chaque paiement : une modification dans l'administration s'applique tout de suite
+  constructor(private source: { rulesFor(id: string): Rules | undefined }, private budget: BudgetStore, private eurPerSat: number) {}
 
   rulesFor(agentId: string): Rules | undefined {
-    return this.rules[agentId]
+    return this.source.rulesFor(agentId)
   }
 
   async evaluate(req: PaymentRequest): Promise<Decision> {
-    const r = this.rules[req.agentId]
+    const r = this.rulesFor(req.agentId)
     if (!r) return { kind: 'deny', reason: 'No rules for this agent' }
 
     const host = new URL(req.url).hostname
