@@ -26,7 +26,13 @@ const PORT = Number(process.env.PROXY_PORT ?? 5050)
 // Par défaut, le proxy n'écoute que sur cet ordinateur (127.0.0.1) : personne d'autre sur le réseau ne le voit.
 // PROXY_HOST=0.0.0.0 l'ouvre au réseau ; il faut alors le mot de passe admin partout, et les clés de démo sont refusées.
 const HOST = process.env.PROXY_HOST ?? '127.0.0.1'
-const EXPOSED = !['127.0.0.1', 'localhost', '::1'].includes(HOST)
+const truthy = (v: string | undefined) => ['1', 'true', 'yes', 'on'].includes(String(v ?? '').trim().toLowerCase())
+// Derrière un serveur web (Caddy, nginx), le proxy écoute sur 127.0.0.1 mais il est PUBLIC : PROXY_PUBLIC=true le dit.
+const EXPOSED = !['127.0.0.1', 'localhost', '::1'].includes(HOST) || truthy(process.env.PROXY_PUBLIC)
+// Adresse publique du proxy (ex. agentgetpay.pdf-libre.de) : un agent ne doit jamais pouvoir l'appeler
+const PUBLIC_HOST = (process.env.PROXY_PUBLIC_HOST ?? '').trim().toLowerCase()
+// Démo publique : le tableau de bord se consulte sans mot de passe (exports, ancrage et administration restent protégés)
+const PUBLIC_READ = truthy(process.env.DASHBOARD_PUBLIC_READ)
 
 const registry = new AgentRegistry()
 const budget = new MemoryBudgetStore()
@@ -67,7 +73,7 @@ function checkTarget(url: unknown, allowed: string[] | undefined): string | unde
   if (!allowed.includes(u.hostname)) return `Domain not allowed: ${u.hostname}`
   // Le proxy lui-même (son journal, son administration) n'est jamais une cible pour un agent
   const self = ['localhost', '127.0.0.1', '[::1]', '0.0.0.0'].includes(u.hostname) && Number(u.port || (u.protocol === 'https:' ? 443 : 80)) === PORT
-  if (self) return 'The payment proxy itself cannot be called by an agent'
+  if (self || (PUBLIC_HOST && u.hostname === PUBLIC_HOST)) return 'The payment proxy itself cannot be called by an agent'
   return undefined
 }
 
@@ -246,7 +252,7 @@ export function createProxy(
 
   // Données du tableau de bord : protégées par le mot de passe admin si le proxy est ouvert au réseau
   if (EXPOSED) {
-    app.use(['/v1/ledger', '/v1/stats', '/v1/export', '/v1/anchor'], requireAdmin)
+    app.use(PUBLIC_READ ? ['/v1/export', '/v1/anchor'] : ['/v1/ledger', '/v1/stats', '/v1/export', '/v1/anchor'], requireAdmin)
   }
 
   // Pour le tableau de bord
@@ -382,7 +388,7 @@ export function createProxy(
 if (process.argv[1]?.endsWith('server.ts')) {
   createProxy().listen(PORT, HOST, () => {
     console.log(`Payment proxy ready on http://localhost:${PORT} — dashboard: http://localhost:${PORT}`)
-    if (EXPOSED) console.log(`⚠ Open to the network on ${HOST}:${PORT}: dashboard needs the admin password, demo API keys are disabled`)
+    if (EXPOSED) console.log(`⚠ Public mode${PUBLIC_HOST ? ` (${PUBLIC_HOST})` : ''}: ${PUBLIC_READ ? 'dashboard readable by anyone, exports and admin need' : 'dashboard needs'} the admin password; demo API keys are disabled`)
     else console.log('Only reachable from this computer (set PROXY_HOST=0.0.0.0 to open it to the network)')
   })
 }
