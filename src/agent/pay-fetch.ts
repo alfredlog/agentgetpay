@@ -73,7 +73,13 @@ export async function payFetch(url: string, init: RequestInit, opts: PayFetchOpt
     const receiptHeader = second.headers.get('PAYMENT-RESPONSE')
     const receipt = receiptHeader ? decode<PaymentResponse>(receiptHeader) : undefined
     if (!second.ok || !receipt?.success) {
-      throw new Error(`Payment rejected by seller: ${receipt?.errorReason ?? second.status}`)
+      // Pas de reçu de paiement : c'est le service qui a refusé le travail (fichier invalide…),
+      // la transaction n'a pas été diffusée, donc rien n'a été payé.
+      if (!receipt) {
+        const detail = await second.text().then(t => { try { return JSON.parse(t).error ?? t } catch { return t } })
+        throw new Error(`Service error ${second.status}: ${String(detail).slice(0, 120)} (not charged)`)
+      }
+      throw new Error(`Payment rejected by seller: ${receipt.errorReason ?? second.status}`)
     }
     opts.onSpent?.(tx)
     return { response: second, paid: { amount, txid: receipt.transaction!, tx } }

@@ -65,6 +65,20 @@ npm run agent:proxy  # 3. an agent making 8 calls
 
 Expected: two quotes paid, the analysis waits for your approval on Telegram, the report is blocked (above the per-payment maximum), and the agent is stopped once its €0.50 daily budget is spent.
 
+### Demo with a real paid service: PDF Libre
+
+[PDF Libre](https://pdf-libre.de) sells PDF compression (20 sats) and merging (30 sats) to agents over HTTP 402. The agent `docs-01` has a €2 daily budget, and needs human approval above €0.25.
+
+1. In the `pdf-tools` repo: `npm install`, add `AGENT_API_ENABLED=true` and `AGENT_PAY_SECRET=<long random string>` to its `.env`, then `npm run dev` (port 3000).
+2. Here: `npm run proxy`, then:
+
+```bash
+npm run agent:pdf                              # with two generated sample PDFs
+npm run agent:pdf -- invoice.pdf contract.pdf  # or with your own files
+```
+
+Expected: the compression is paid automatically, the merge waits for your approval on Telegram, and a damaged file is refused by PDF Libre without being charged. Results are saved in `data/out/`.
+
 ### Prove the audit log on the blockchain
 
 ```bash
@@ -100,6 +114,7 @@ Restarting the proxy resets the daily budgets (they are kept in memory).
 | `npm run agent` | One agent paying directly, without the proxy |
 | `npm run proxy` | Start the payment proxy and dashboard on port 5050 |
 | `npm run agent:proxy` | Run the 8-call demo scenario through the proxy |
+| `npm run agent:pdf` | Agent buying PDF compression and merging from PDF Libre |
 | `npm run telegram:setup` | Find your Telegram chat id and save it in `.env` |
 | `npm run anchor` | Anchor the audit log on BSV now |
 | `npm run ledger:verify` | Verify the audit log against the blockchain |
