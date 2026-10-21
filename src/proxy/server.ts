@@ -17,6 +17,7 @@ import { Mutex } from '../shared/mutex.js'
 import { DatevExporter, loadAccountingConfig, monthlyStatementHtml } from './accounting.js'
 import { AgentRegistry, validateRules, validAgentId } from './registry.js'
 import type { Broadcaster } from '@bsv/sdk'
+import { decode, PaymentRequired } from '../shared/x402.js'
 
 // Testnet : les coins n'ont pas de valeur, on fixe un taux fictif pour des montants lisibles.
 // Mainnet : ce taux viendra d'une API de cours en temps réel.
@@ -25,7 +26,13 @@ const PORT = Number(process.env.PROXY_PORT ?? 5050)
 // Par défaut, le proxy n'écoute que sur cet ordinateur (127.0.0.1) : personne d'autre sur le réseau ne le voit.
 // PROXY_HOST=0.0.0.0 l'ouvre au réseau ; il faut alors le mot de passe admin partout, et les clés de démo sont refusées.
 const HOST = process.env.PROXY_HOST ?? '127.0.0.1'
-const EXPOSED = !['127.0.0.1', 'localhost', '::1'].includes(HOST)
+const truthy = (v: string | undefined) => ['1', 'true', 'yes', 'on'].includes(String(v ?? '').trim().toLowerCase())
+// Derrière un serveur web (Caddy, nginx), le proxy écoute sur 127.0.0.1 mais il est PUBLIC : PROXY_PUBLIC=true le dit.
+const EXPOSED = !['127.0.0.1', 'localhost', '::1'].includes(HOST) || truthy(process.env.PROXY_PUBLIC)
+// Adresse publique du proxy (ex. agentpay.pdf-libre.de) : un agent ne doit jamais pouvoir l'appeler
+const PUBLIC_HOST = (process.env.PROXY_PUBLIC_HOST ?? '').trim().toLowerCase()
+// Démo publique : le tableau de bord se consulte sans mot de passe (exports, ancrage et administration restent protégés)
+const PUBLIC_READ = truthy(process.env.DASHBOARD_PUBLIC_READ)
 
 const registry = new AgentRegistry()
 const budget = new MemoryBudgetStore()
@@ -66,7 +73,7 @@ function checkTarget(url: unknown, allowed: string[] | undefined): string | unde
   if (!allowed.includes(u.hostname)) return `Domain not allowed: ${u.hostname}`
   // Le proxy lui-même (son journal, son administration) n'est jamais une cible pour un agent
   const self = ['localhost', '127.0.0.1', '[::1]', '0.0.0.0'].includes(u.hostname) && Number(u.port || (u.protocol === 'https:' ? 443 : 80)) === PORT
-  if (self) return 'The payment proxy itself cannot be called by an agent'
+  if (self || (PUBLIC_HOST && u.hostname === PUBLIC_HOST)) return 'The payment proxy itself cannot be called by an agent'
   return undefined
 }
 
@@ -113,15 +120,37 @@ export function createProxy(
   let pendingSeq = 0
 
   // L'agent s'identifie avec sa clé d'API (jamais avec une clé de portefeuille)
-  app.post('/v1/fetch', async (req, res) => {
+  const authAgent = (req: express.Request, res: express.Response) => {
     const agent = registry.authenticate(req.get('Authorization'))
-    if (!agent) return res.status(401).json({ error: 'Unknown agent' })
+    if (!agent) { res.status(401).json({ error: 'Unknown agent' }); return undefined }
     // Les clés de démo (dev-…) sont publiques dans le dépôt : interdites dès que le proxy est ouvert au réseau
     if (EXPOSED && agent.apiKey && !agent.keyHash) {
-      return res.status(401).json({ error: 'Demo API keys are disabled when the proxy is open to the network. Issue a new key on the admin page.' })
+      res.status(401).json({ error: 'Demo API keys are disabled when the proxy is open to the network. Issue a new key on the admin page.' })
+      return undefined
     }
+    return agent
+  }
 
-    const { url, method = 'GET', body, purpose } = req.body ?? {}
+  // L'agent consulte SES règles, son budget restant et ses dernières opérations (rien sur les autres agents)
+  app.get('/v1/me', async (req, res) => {
+    const agent = authAgent(req, res)
+    if (!agent) return
+    const rules = registry.rulesFor(agent.id)
+    const spentEur = (await budget.spentToday(agent.id)) * EUR_PER_SAT
+    const recent = (await ledger.all()).filter(e => e.agentId === agent.id && e.decision !== 'admin').slice(-10).reverse()
+      .map(e => ({ time: e.ts, url: e.url, amountEur: e.amountEur, decision: e.decision, reason: e.reason, approvedBy: e.approvedBy, txid: e.txid }))
+    res.json({
+      agentId: agent.id, active: registry.isActive(agent.id), rules, spentEur,
+      remainingEur: rules ? Math.max(0, Math.round((rules.daily_budget_eur - spentEur) * 100) / 100) : 0,
+      recent
+    })
+  })
+
+  app.post('/v1/fetch', async (req, res) => {
+    const agent = authAgent(req, res)
+    if (!agent) return
+
+    const { url, method = 'GET', body, purpose, dryRun } = req.body ?? {}
     if (!url) return res.status(400).json({ error: 'Missing url' })
 
     // Contrôles AVANT tout appel réseau, que le service soit payant ou gratuit
@@ -133,6 +162,25 @@ export function createProxy(
     if (!registry.isActive(agent.id)) return refuse('Agent suspended by an administrator')
     const target = checkTarget(url, registry.rulesFor(agent.id)?.allowed_domains)
     if (target) return refuse(target)
+
+    // Devis : demande le prix sans payer (la requête est envoyée sans contenu, rien n'est enregistré)
+    if (dryRun) {
+      try {
+        const r = await fetch(url, { method, redirect: 'manual' })
+        if (r.status !== 402) return res.json({ paymentRequired: false, status: r.status })
+        const offer = decode<PaymentRequired>(r.headers.get('PAYMENT-REQUIRED') ?? '')
+        const sats = Number(offer.accepts?.[0]?.amount)
+        if (!Number.isFinite(sats)) return res.status(502).json({ error: 'The service returned an unreadable price' })
+        const amountEur = sats * EUR_PER_SAT
+        const d = await policy.evaluate({ agentId: agent.id, url, amountSats: sats, amountEur, purpose })
+        return res.json({
+          paymentRequired: true, priceSats: sats, priceEur: amountEur, description: offer.resource?.description,
+          decision: d.kind, reason: d.kind === 'allow' ? undefined : d.reason
+        })
+      } catch (e) {
+        return res.status(502).json({ error: (e as Error).message === 'fetch failed' ? `Service unreachable: ${new URL(url).host}` : (e as Error).message })
+      }
+    }
 
     let decision: Decision | undefined
     let approvedBy: string | undefined
@@ -204,7 +252,7 @@ export function createProxy(
 
   // Données du tableau de bord : protégées par le mot de passe admin si le proxy est ouvert au réseau
   if (EXPOSED) {
-    app.use(['/v1/ledger', '/v1/stats', '/v1/export', '/v1/anchor'], requireAdmin)
+    app.use(PUBLIC_READ ? ['/v1/export', '/v1/anchor'] : ['/v1/ledger', '/v1/stats', '/v1/export', '/v1/anchor'], requireAdmin)
   }
 
   // Pour le tableau de bord
@@ -340,7 +388,7 @@ export function createProxy(
 if (process.argv[1]?.endsWith('server.ts')) {
   createProxy().listen(PORT, HOST, () => {
     console.log(`Payment proxy ready on http://localhost:${PORT} — dashboard: http://localhost:${PORT}`)
-    if (EXPOSED) console.log(`⚠ Open to the network on ${HOST}:${PORT}: dashboard needs the admin password, demo API keys are disabled`)
+    if (EXPOSED) console.log(`⚠ Public mode${PUBLIC_HOST ? ` (${PUBLIC_HOST})` : ''}: ${PUBLIC_READ ? 'dashboard readable by anyone, exports and admin need' : 'dashboard needs'} the admin password; demo API keys are disabled`)
     else console.log('Only reachable from this computer (set PROXY_HOST=0.0.0.0 to open it to the network)')
   })
 }
