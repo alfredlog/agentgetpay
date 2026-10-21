@@ -1,6 +1,6 @@
 # À ajouter dans le Caddyfile du VPS (souvent /etc/caddy/Caddyfile), puis : sudo systemctl reload caddy
 # Caddy obtient et renouvelle le certificat HTTPS tout seul.
-agentgetpay.pdf-libre.de {
+agentpay.pdf-libre.de {
 	encode gzip
 
 	# Serveur MCP (assistants IA en mode HTTP)
