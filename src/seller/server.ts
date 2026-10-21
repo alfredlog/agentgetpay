@@ -138,4 +138,5 @@ app.get('/api/report', requirePayment(30, 'Full report'), (_req, res) => {
   res.json({ report: 'Full 40-page report (simulated).' })
 })
 
-app.listen(PORT, () => console.log(`Seller ready on http://localhost:${PORT} — /api/quote (10 sats), /api/analysis (18), /api/report (30)`))
+// Seulement sur cet ordinateur par défaut (SELLER_HOST=0.0.0.0 pour l'ouvrir au réseau)
+app.listen(PORT, process.env.SELLER_HOST ?? '127.0.0.1', () => console.log(`Seller ready on http://localhost:${PORT} — /api/quote (10 sats), /api/analysis (18), /api/report (30)`))

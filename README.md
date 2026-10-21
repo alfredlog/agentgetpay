@@ -110,7 +110,13 @@ The dashboard also has **Export DATEV** and **Monthly statement** buttons. The s
 
 Accounts, consultant and client numbers are in `config/accounting.json` (SKR03 examples). The file is a simplified *Buchungsstapel* with the 14 main columns: validate it with a tax advisor and a test import in DATEV before real use. Network fees are not booked yet.
 
-Restarting the proxy resets the daily budgets (they are kept in memory).
+Daily spending is rebuilt from the audit log when the proxy starts, so restarting it does not reset budgets. To reset an agent's spending (for example between demo rehearsals), use **Reset today's spending** on the admin page.
+
+## Security
+
+- **Allowed domains apply to every request**, paid or free. Agents cannot call other domains, non-HTTP URLs, or the proxy itself, and redirects are never followed.
+- **The proxy only listens on this computer** (`127.0.0.1`). To open it to the network (for example for a teammate), set `PROXY_HOST=0.0.0.0` in `.env`: the dashboard and exports then require the admin password, and the demo keys (`dev-…`, published in this repo) stop working. Issue new keys on the admin page.
+- The seller listens on this computer too (`SELLER_HOST` to change it).
 
 ## Scripts
 
