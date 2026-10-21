@@ -25,6 +25,7 @@ export interface BudgetStore {
   spentToday(agentId: string): Promise<number> // en sats
   tryReserve(agentId: string, sats: number, limitSats: number): Promise<boolean>
   release(agentId: string, sats: number): Promise<void>
+  reset(agentId: string): Promise<void> // remet le compteur du jour à zéro (administration)
 }
 
 // Garde les clés et signe. Hackathon : variable d'environnement. Entreprise : HashiCorp Vault.
@@ -41,7 +42,7 @@ export interface LedgerEntry {
   amountSats: number
   amountEur: number
   purpose?: string
-  decision: Decision['kind'] | 'error'
+  decision: Decision['kind'] | 'error' | 'admin' // 'admin' = modification des règles
   reason?: string
   txid?: string
   approvedBy?: string // qui a validé (Vier-Augen-Prinzip)

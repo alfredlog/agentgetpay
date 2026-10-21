@@ -16,6 +16,9 @@ export class MemoryBudgetStore implements BudgetStore {
     this.spent.set(k, current + sats)
     return true
   }
+  async reset(agentId: string) {
+    this.spent.delete(this.key(agentId))
+  }
   async release(agentId: string, sats: number) {
     const k = this.key(agentId)
     this.spent.set(k, Math.max(0, (this.spent.get(k) ?? 0) - sats))
