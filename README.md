@@ -5,6 +5,7 @@ Companies want AI agents that can pay for APIs and data on their own, but no fin
 - **Agents never hold keys.** They call the payment proxy with an API key; the proxy holds the wallet.
 - **Every payment is checked before it is signed:** daily budget, max per payment, allowed domains.
 - **A human approves large payments** from their phone (Telegram), and their name is recorded.
+- **Finance gets a DATEV export** and a monthly statement, one booking per payment.
 - **Every decision is logged** in a hash-chained audit log, **anchored on the BSV blockchain** so anyone can prove it was never altered.
 - **Payments are micropayments over HTTP 402**, following the [BRC-166](https://github.com/bsv-blockchain/BRCs/blob/master/payments/0166.md) standard (x402 on BSV).
 
@@ -73,6 +74,19 @@ npm run demo:tamper     # a "smart" attacker edits entry #2 and recomputes every
 npm run ledger:verify   # local chain looks fine, BSV anchor does not → AUDIT LOG TAMPERED
 ```
 
+### Accounting export (DATEV)
+
+German accountants work in DATEV. Every paid entry becomes one booking, with the audit log entry as voucher number (`AGP-<n>`) and the BSV transaction as reference.
+
+```bash
+npm run export:datev            # this month → data/exports/EXTF_Buchungsstapel_AgentGetPay_YYYY-MM.csv
+npm run export:datev -- 2026-10 # a given month
+```
+
+The dashboard also has **Export DATEV** and **Monthly statement** buttons. The statement is a printable voucher listing every payment, who approved it, and the blockchain anchor that seals it.
+
+Accounts, consultant and client numbers are in `config/accounting.json` (SKR03 examples). The file is a simplified *Buchungsstapel* with the 14 main columns: validate it with a tax advisor and a test import in DATEV before real use. Network fees are not booked yet.
+
 Restarting the proxy resets the daily budgets (they are kept in memory).
 
 ## Scripts
@@ -90,6 +104,7 @@ Restarting the proxy resets the daily budgets (they are kept in memory).
 | `npm run anchor` | Anchor the audit log on BSV now |
 | `npm run ledger:verify` | Verify the audit log against the blockchain |
 | `npm run demo:tamper` | Tamper with the log (demo only) |
+| `npm run export:datev` | Export the month's payments as a DATEV file |
 | `npm run test:local`, `npm run test:proxy` | Offline tests with a fake wallet |
 
 Code comments are in French.

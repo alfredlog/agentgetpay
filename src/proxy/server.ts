@@ -13,6 +13,7 @@ import { Decision, ApprovalChannel } from './types.js'
 import { TelegramApprovalChannel, AutoApprovalChannel } from './approval.js'
 import { AnchorLog, BsvAnchorRail, verifyAgainstChain, cachedWocFetch, FetchTxHex, Anchor } from './anchor.js'
 import { Mutex } from '../shared/mutex.js'
+import { DatevExporter, loadAccountingConfig, monthlyStatementHtml } from './accounting.js'
 import type { Broadcaster } from '@bsv/sdk'
 
 // Testnet : les coins n'ont pas de valeur, on fixe un taux fictif pour des montants lisibles.
@@ -167,6 +168,20 @@ export function createProxy(
   app.get('/v1/ledger/verify-chain', async (_req, res) => {
     try { res.json(await verifyAgainstChain(await ledger.all(), anchorLog.all(), fetchTxHex)) }
     catch (e) { res.status(502).json({ error: (e as Error).message }) }
+  })
+
+  // Export comptable du mois (par défaut : le mois en cours)
+  const currentMonth = () => new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Berlin' }).slice(0, 7)
+  app.get('/v1/export/datev', async (req, res) => {
+    try {
+      const { filename, content } = new DatevExporter(loadAccountingConfig()).exportMonth(await ledger.all(), String(req.query.month ?? currentMonth()))
+      res.set('Content-Disposition', `attachment; filename="${filename}"`).set('Content-Type', 'text/csv; charset=windows-1252').send(Buffer.from(content, 'latin1'))
+    } catch (e) { res.status(400).json({ error: (e as Error).message }) }
+  })
+  app.get('/v1/export/statement', async (req, res) => {
+    const month = String(req.query.month ?? currentMonth())
+    if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'Month must look like 2026-10' })
+    res.type('html').send(monthlyStatementHtml(await ledger.all(), anchorLog.all(), month, loadAccountingConfig()))
   })
 
   // Ancrer tout de suite (bouton du tableau de bord ou npm run anchor)
