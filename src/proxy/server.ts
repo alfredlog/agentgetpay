@@ -69,7 +69,7 @@ export function createProxy(
   const record = async (e: Parameters<typeof ledger.record>[0]) => { await ledger.record(e); void maybeAnchor() }
 
   const app = express()
-  app.use(express.json())
+  app.use(express.json({ limit: '60mb' })) // assez grand pour des PDF en base64
   app.use(express.static('public')) // le tableau de bord : http://localhost:5050
 
   // Validations en attente, pour les afficher en direct sur le tableau de bord
@@ -90,7 +90,11 @@ export function createProxy(
     let amountSats = 0
 
     try {
-      const { response, paid } = await payFetch(url, { method, body: body ? JSON.stringify(body) : undefined }, {
+      const { response, paid } = await payFetch(url, {
+        method,
+        body: body ? JSON.stringify(body) : undefined,
+        headers: body ? { 'Content-Type': 'application/json' } : undefined
+      }, {
         address: keys.address(agent.id),
         unlocker: () => keys.unlocker(agent.id),
         utxos,
@@ -131,7 +135,8 @@ export function createProxy(
         await record({ agentId: agent.id, url, amountSats, amountEur: amountSats * EUR_PER_SAT, purpose, decision: 'allow', txid: paid.txid, approvedBy })
         console.log(`✔ ${agent.id} paid ${fmt(amountSats * EUR_PER_SAT)} (${amountSats} sats) → ${url}${approvedBy ? ` — approved by ${approvedBy}` : ''}`)
       }
-      res.status(response.status).set('X-Paid-Sats', String(paid?.amount ?? 0)).send(await response.text())
+      res.status(response.status).set('X-Paid-Sats', String(paid?.amount ?? 0))
+        .type(response.headers.get('content-type') ?? 'text/plain').send(Buffer.from(await response.arrayBuffer()))
     } catch (err) {
       if (reserved) await budget.release(agent.id, reserved) // paiement échoué : on rend le budget
       const d = decision && decision.kind !== 'allow' ? decision : undefined
