@@ -3,12 +3,25 @@
     "daily_budget_eur": 0.5,
     "max_per_payment_eur": 0.25,
     "approval_above_eur": 0.15,
-    "allowed_domains": ["localhost"]
+    "allowed_domains": [
+      "localhost"
+    ]
   },
   "achats-01": {
     "daily_budget_eur": 5,
     "max_per_payment_eur": 1,
     "approval_above_eur": 0.5,
-    "allowed_domains": ["pdf-libre.de"]
+    "allowed_domains": [
+      "pdf-libre.de"
+    ]
+  },
+  "docs-01": {
+    "daily_budget_eur": 2,
+    "max_per_payment_eur": 1,
+    "approval_above_eur": 0.25,
+    "allowed_domains": [
+      "localhost",
+      "pdf-libre.de"
+    ]
   }
 }
