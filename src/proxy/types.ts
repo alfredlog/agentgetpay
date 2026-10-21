@@ -46,6 +46,7 @@ export interface LedgerEntry {
   reason?: string
   txid?: string
   approvedBy?: string // qui a validé (Vier-Augen-Prinzip)
+  action?: string     // pour les entrées 'admin' : type de modification (ex. 'budget_reset')
   prevHash: string
   hash: string
 }
