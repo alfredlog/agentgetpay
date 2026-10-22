@@ -52,6 +52,10 @@
   .key code { font-size: 13px; color: var(--text); }
   #login { max-width: 420px; margin: 60px auto; }
   .hint { color: var(--muted); font-size: 13px; }
+  .conns { border-top: 1px solid var(--line); margin-top: 14px; }
+  .conn { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 0; }
+  .key.pairbox { word-break: normal; } .key.pairbox code { word-break: break-all; }
+  code.pair { font-size: 22px; letter-spacing: .12em; font-weight: 700; }
   .hidden { display: none; }
   @media (max-width: 520px) { .row { grid-template-columns: 1fr; } }
 </style>
@@ -138,8 +142,12 @@ $('l-btn').onclick = signIn
 $('l-token').onkeydown = e => { if (e.key === 'Enter') signIn() }
 $('l-name').oninput = $('l-token').oninput = () => { $('l-msg').textContent = '' }
 
+let connections = []
+const ago = ts => { const m = Math.round((Date.now() - Date.parse(ts)) / 60000); return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : new Date(ts).toLocaleDateString() }
+
 async function load() {
-  const agents = await api('/agents')
+  const [agents, conns] = await Promise.all([api('/agents'), api('/connections')])
+  connections = conns
   $('login').classList.add('hidden'); $('app').classList.remove('hidden')
   $('who').innerHTML = ` · signed in as <b>${esc(auth.name)}</b> · <a href="#" id="logout">sign out</a>`
   $('logout').onclick = e => { e.preventDefault(); store.del('agp-token'); auth.token = ''; showLogin() }
@@ -197,6 +205,11 @@ function card(a) {
       <button class="danger" data-a="status">${a.active ? 'Suspend' : 'Reactivate'}</button>
     </div>
     <div class="msg" data-msg></div><div data-key></div>
+    <div class="conns">
+      <div class="top" style="margin:14px 0 6px"><span class="hint">Connected assistants</span><button data-a="pair">Connect an assistant</button></div>
+      ${connections.filter(g => g.agentId === a.id).map(g => `<div class="conn"><span><b>${esc(g.clientName)}</b> <span class="hint">· since ${new Date(g.createdAt).toLocaleDateString()} · used ${ago(g.lastUsedAt)}</span></span><button class="danger" data-revoke="${esc(g.id)}">Disconnect</button></div>`).join('') || '<div class="hint">None yet.</div>'}
+      <div data-pair></div>
+    </div>
   </div>`
 }
 
@@ -223,6 +236,18 @@ function wire(a) {
   c.querySelector('[data-a="status"]').onclick = e => run(e.target, async () => {
     await api(`/agents/${a.id}/status`, 'POST', { active: !a.active }); await load()
   })
+  c.querySelector('[data-a="pair"]').onclick = e => run(e.target, async () => {
+    const r = await api(`/agents/${a.id}/pairing`, 'POST')
+    const until = new Date(r.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    c.querySelector('[data-pair]').innerHTML = `<div class="key pairbox">
+      <b>Connect an AI assistant as ${esc(a.id)}</b><br>
+      1. In the assistant (Claude: Settings → Connectors → Add custom connector), add the URL<br><code>${esc(r.connectorUrl)}</code><br>
+      2. Click <b>Connect</b>. On the AgentGetPay page, enter this code:<br><code class="pair">${esc(r.code)}</code><br>
+      Single use, valid until ${until}.</div>`
+  })
+  c.querySelectorAll('[data-revoke]').forEach(b => b.onclick = e => run(e.target, async () => {
+    await api('/connections/' + b.dataset.revoke, 'DELETE'); await load()
+  }))
   c.querySelector('[data-a="key"]').onclick = e => run(e.target, async () => {
     const r = await api(`/agents/${a.id}/key`, 'POST')
     c.querySelector('[data-key]').innerHTML = `<div class="key">New API key, shown <b>only once</b>. The old key no longer works. Give this one to the agent:<br><code>${esc(r.apiKey)}</code></div>`

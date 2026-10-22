@@ -8,8 +8,9 @@
 //   MCP_TRANSPORT=stdio (par défaut) → l'application lance ce programme sur l'ordinateur.
 //       La clé de l'agent vient de AGENTGETPAY_API_KEY.
 //   MCP_TRANSPORT=http → serveur web sur http://127.0.0.1:5070/mcp.
-//       Chaque client envoie SA clé d'agent : "Authorization: Bearer <clé>". Plusieurs agents peuvent
-//       donc partager ce serveur, chacun avec son budget.
+//       Chaque client s'identifie comme UN agent, avec son budget : soit une clé d'agent
+//       ("Authorization: Bearer agp_…"), soit un jeton obtenu par connexion OAuth (Claude, ChatGPT…).
+//       Sans identifiant valide, on répond 401 avec l'adresse de la connexion OAuth : l'assistant affiche « Connecter ».
 //
 // Fichiers : l'IA ne lit ni n'écrit librement sur le disque. Elle ne voit que le dossier de travail
 // (MCP_WORKSPACE, par défaut ./workspace). Dans un appel, {"$file": "facture.pdf"} est remplacé par
@@ -210,13 +211,51 @@ if ((process.env.MCP_TRANSPORT ?? 'stdio') === 'http') {
   const app = express()
   app.use(express.json({ limit: '60mb' }))
 
-  // Mode sans session : un serveur MCP neuf par requête, lié à la clé de l'agent qui appelle
+  // Où se trouve la connexion OAuth (servie par le proxy, à son adresse publique)
+  const publicHost = process.env.PROXY_PUBLIC_HOST?.trim()
+  const issuer = (process.env.OAUTH_ISSUER ?? (publicHost ? `https://${publicHost}` : PROXY)).replace(/\/$/, '')
+  const resourceMetadata = `${issuer}/.well-known/oauth-protected-resource/mcp`
+  const unauthorized = (res: express.Response, message: string, invalid = false) => res.status(401)
+    .set('WWW-Authenticate', `Bearer resource_metadata="${resourceMetadata}"${invalid ? ', error="invalid_token"' : ''}`)
+    .json({ jsonrpc: '2.0', error: { code: -32001, message }, id: null })
+
+  // Certains clients cherchent la description OAuth sur l'adresse du serveur MCP lui-même : on relaie celle du proxy
+  app.get(['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp'], async (_req, res) => {
+    const r = await fetch(`${PROXY}/.well-known/oauth-protected-resource/mcp`).catch(() => undefined)
+    if (!r?.ok) return res.status(503).json({ error: 'AgentGetPay proxy unreachable' })
+    res.set('Access-Control-Allow-Origin', '*').json(await r.json())
+  })
+
+  // Les assistants qui tournent dans un navigateur ont besoin de lire l'en-tête WWW-Authenticate
+  app.use('/mcp', (req, res, next) => {
+    res.set('Access-Control-Allow-Origin', '*')
+    res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type, MCP-Protocol-Version, Mcp-Session-Id')
+    res.set('Access-Control-Expose-Headers', 'WWW-Authenticate, Mcp-Session-Id')
+    if (req.method === 'OPTIONS') return res.sendStatus(204)
+    next()
+  })
+
+  // Le jeton est-il valable ? On demande au proxy (il connaît les clés d'agent et les jetons OAuth).
+  // Petit cache de 30 s pour ne pas interroger le proxy à chaque message.
+  const valid = new Map<string, number>()
+  const checkToken = async (t: string) => {
+    if ((valid.get(t) ?? 0) > Date.now()) return true
+    const r = await fetch(`${PROXY}/v1/me`, { headers: { Authorization: `Bearer ${t}` } }).catch(() => undefined)
+    if (!r) throw new Error('proxy unreachable')
+    if (r.status === 401) { valid.delete(t); return false }
+    if (valid.size > 1000) valid.clear()
+    valid.set(t, Date.now() + 30_000)
+    return true
+  }
+
+  // Mode sans session : un serveur MCP neuf par requête, lié à l'agent qui appelle
   app.post('/mcp', async (req, res) => {
     const auth = req.get('Authorization') ?? ''
-    if (!auth.startsWith('Bearer ') || auth.length < 12) {
-      return res.status(401).json({ jsonrpc: '2.0', error: { code: -32001, message: 'Missing agent API key (Authorization: Bearer …)' }, id: null })
-    }
-    const server = buildServer(auth.slice(7))
+    if (!auth.startsWith('Bearer ') || auth.length < 12) return unauthorized(res, 'Sign in required: connect this assistant to AgentGetPay')
+    const t = auth.slice(7)
+    try { if (!(await checkToken(t))) return unauthorized(res, 'Invalid or expired token: connect again', true) }
+    catch { return res.status(503).json({ jsonrpc: '2.0', error: { code: -32002, message: 'AgentGetPay proxy unreachable' }, id: null }) }
+    const server = buildServer(t)
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,
@@ -228,7 +267,10 @@ if ((process.env.MCP_TRANSPORT ?? 'stdio') === 'http') {
     await server.connect(transport)
     await transport.handleRequest(req, res, req.body)
   })
-  app.all('/mcp', (_req, res) => res.status(405).set('Allow', 'POST').json({ error: 'Use POST' }))
+  app.all('/mcp', (req, res) => {
+    if (!req.get('Authorization')) return unauthorized(res, 'Sign in required: connect this assistant to AgentGetPay')
+    res.status(405).set('Allow', 'POST').json({ error: 'Use POST' })
+  })
 
   app.listen(PORT, HOST, () => log(`AgentGetPay MCP server on http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}/mcp (proxy: ${PROXY}, workspace: ${WORKSPACE})`))
 } else {

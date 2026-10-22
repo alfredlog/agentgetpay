@@ -101,6 +101,10 @@ npm run mcp:config -- <api-key> # same, for an agent whose key was issued on the
 
 **HTTP mode**, for several agents sharing one server: `npm run mcp:http`, then connect to `http://127.0.0.1:5070/mcp` with `Authorization: Bearer <agent API key>`. Each client acts as its own agent, with its own budget.
 
+**Connect Claude, ChatGPT and other assistants without any key (OAuth).** On the admin page, click **Connect an assistant** on an agent: it shows the connector URL (`https://<your-host>/mcp`) and a single-use connection code (valid 15 minutes). In the assistant, add a custom connector with that URL and click **Connect**; on the AgentGetPay page, type the code. The assistant then spends within that agent's budget and rules. The admin page lists connected assistants and can disconnect them at any time; connections are recorded in the audit log.
+
+Under the hood: OAuth 2.1 with discovery (RFC 9728, RFC 8414), dynamic client registration (RFC 7591), mandatory PKCE (S256), 1-hour access tokens, rotating refresh tokens, hashed storage, 10 wrong codes per 15 minutes per IP. Test: `npm run test:oauth` (uses the official MCP client).
+
 **Files:** the assistant only sees the `workspace/` folder. In a request body, `{"$file": "invoice.pdf"}` is replaced by the file's content; files received (for example a compressed PDF) are saved in `workspace/out/`. Paths outside the folder and symbolic links pointing outside are refused.
 
 Payments above the approval threshold wait up to 2 minutes for the human; some assistants stop waiting for a tool earlier.
@@ -166,6 +170,7 @@ Daily spending is rebuilt from the audit log when the proxy starts, so restartin
 | `npm run export:datev` | Export the month's payments as a DATEV file |
 | `npm run mcp` / `npm run mcp:http` | MCP server for AI assistants (local / HTTP on port 5070) |
 | `npm run mcp:config` | Print the MCP configuration to paste into an assistant |
+| `npm run test:oauth` | Test the OAuth connection of assistants, offline |
 | `npm run test:local`, `npm run test:proxy` | Offline tests with a fake wallet |
 
 Code comments are in French.

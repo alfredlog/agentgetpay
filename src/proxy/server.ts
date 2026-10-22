@@ -17,6 +17,7 @@ import { Mutex } from '../shared/mutex.js'
 import { DatevExporter, loadAccountingConfig, monthlyStatementHtml } from './accounting.js'
 import { AgentRegistry, validateRules, validAgentId } from './registry.js'
 import { ViewerStore, validViewerName } from './viewers.js'
+import { OAuthServer } from './oauth.js'
 import type { Broadcaster } from '@bsv/sdk'
 import { decode, PaymentRequired } from '../shared/x402.js'
 
@@ -34,6 +35,9 @@ const EXPOSED = !['127.0.0.1', 'localhost', '::1'].includes(HOST) || truthy(proc
 const PUBLIC_HOST = (process.env.PROXY_PUBLIC_HOST ?? '').trim().toLowerCase()
 // Démo publique : le tableau de bord se consulte sans mot de passe (exports, ancrage et administration restent protégés)
 const PUBLIC_READ = truthy(process.env.DASHBOARD_PUBLIC_READ)
+// Connexion OAuth des assistants IA : adresse publique de ce serveur et du serveur MCP
+const ISSUER = (process.env.OAUTH_ISSUER ?? (PUBLIC_HOST ? `https://${PUBLIC_HOST}` : `http://127.0.0.1:${PORT}`)).replace(/\/$/, '')
+const MCP_URL = (process.env.MCP_PUBLIC_URL ?? (PUBLIC_HOST ? `${ISSUER}/mcp` : `http://127.0.0.1:${process.env.MCP_PORT ?? 5070}/mcp`)).replace(/\/$/, '')
 
 const registry = new AgentRegistry()
 const viewers = new ViewerStore() // personnes autorisées à consulter le tableau de bord
@@ -62,6 +66,10 @@ const approvals: ApprovalChannel = process.env.TELEGRAM_BOT_TOKEN && process.env
 const isAdmin = (req: express.Request) => {
   const given = Buffer.from(String(req.get('X-Admin-Token') ?? ''))
   const expected = Buffer.from(ADMIN_TOKEN)
+  return given.length === expected.length && timingSafeEqual(given, expected)
+}
+const isAdminPassword = (password: string) => {
+  const given = Buffer.from(password), expected = Buffer.from(ADMIN_TOKEN)
   return given.length === expected.length && timingSafeEqual(given, expected)
 }
 function requireAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
@@ -122,7 +130,21 @@ export function createProxy(
   const record = async (e: Parameters<typeof ledger.record>[0]) => { await ledger.record(e); void maybeAnchor() }
 
   const app = express()
+  app.set('trust proxy', 'loopback') // derrière Caddy : la vraie adresse IP du visiteur (limite d'essais de connexion)
   app.use(express.json({ limit: '60mb' })) // assez grand pour des PDF en base64
+
+  // Connexion OAuth des assistants IA (Claude, ChatGPT…) au serveur MCP distant
+  const oauth = new OAuthServer({
+    issuer: ISSUER, resource: MCP_URL,
+    agentExists: id => !!registry.get(id),
+    agentActive: id => registry.isActive(id),
+    checkAdminPassword: isAdminPassword,
+    onConnect: async g => {
+      await record({ agentId: g.agentId, url: `admin://agents/${g.agentId}`, amountSats: 0, amountEur: 0, decision: 'admin', reason: `Assistant connected: ${g.clientName}`, approvedBy: g.by })
+      console.log(`🔗 ${g.clientName} connected as ${g.agentId} (code from ${g.by})`)
+    }
+  })
+  app.use(oauth.router())
   app.use(express.static('public')) // le tableau de bord : http://localhost:5050
 
   // Validations en attente, pour les afficher en direct sur le tableau de bord
@@ -131,6 +153,13 @@ export function createProxy(
 
   // L'agent s'identifie avec sa clé d'API (jamais avec une clé de portefeuille)
   const authAgent = (req: express.Request, res: express.Response) => {
+    // Assistant connecté par OAuth : son jeton est lié à un agent
+    const viaOAuth = oauth.authenticate(req.get('Authorization'))
+    if (viaOAuth) {
+      const a = registry.get(viaOAuth)
+      if (!a) { res.status(401).json({ error: 'Unknown agent' }); return undefined }
+      return a
+    }
     const agent = registry.authenticate(req.get('Authorization'))
     if (!agent) { res.status(401).json({ error: 'Unknown agent' }); return undefined }
     // Les clés de démo (dev-…) sont publiques dans le dépôt : interdites dès que le proxy est ouvert au réseau
@@ -382,6 +411,21 @@ export function createProxy(
       res.json({ ok: true, apiKey })
     } catch (e) { res.status(400).json({ error: (e as Error).message }) }
   })
+  // Connexion d'un assistant IA : code à usage unique pour un agent
+  admin.post('/agents/:id/pairing', async (req, res) => {
+    const id = req.params.id
+    if (!registry.get(id)) return res.status(404).json({ error: 'Unknown agent' })
+    if (!registry.isActive(id)) return res.status(400).json({ error: 'Reactivate the agent first' })
+    res.json({ ok: true, ...oauth.createPairing(id, who(req)), connectorUrl: MCP_URL })
+  })
+  admin.get('/connections', (_req, res) => res.json(oauth.connections()))
+  admin.delete('/connections/:id', async (req, res) => {
+    const g = oauth.revoke(req.params.id)
+    if (!g) return res.status(404).json({ error: 'Unknown connection' })
+    await logChange(req, g.agentId, `Assistant disconnected: ${g.clientName}`)
+    res.json({ ok: true })
+  })
+
   // Accès au tableau de bord (lecture seule) pour les personnes autorisées
   const viewerLog = (req: express.Request, change: string) =>
     record({ agentId: 'dashboard-access', url: 'admin://dashboard-access', amountSats: 0, amountEur: 0, decision: 'admin', reason: change, approvedBy: who(req) })
