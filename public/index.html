@@ -60,14 +60,33 @@
   .table-wrap { overflow-x: auto; padding: 0; }
   .empty { padding: 24px; text-align: center; color: var(--muted); }
   @media (max-width: 720px) { .kpis { grid-template-columns: repeat(2, 1fr); } }
+  .hidden { display: none !important; }
+  #gate { max-width: 420px; margin: 60px auto; }
+  #gate .name { font-weight: 600; font-size: 17px; }
+  #gate p { color: var(--muted); font-size: 14px; margin: 6px 0 14px; }
+  #gate input { width: 100%; font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); margin-bottom: 10px; }
+  #gate .primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #gate .msg { color: var(--bad); font-size: 13px; margin-top: 8px; min-height: 1em; }
+  .who { color: var(--muted); font-size: 13px; align-self: center; }
 </style>
 </head>
 <body>
 <main>
   <header>
     <h1>Agent Spend Control<small>Budgets, approvals and audit for autonomous AI agents · BSV testnet</small></h1>
-    <span class="actions"><span id="chain" class="pill">Checking audit log…</span><a class="btn" href="/admin.html">Manage agents</a></span>
+    <span class="actions"><span id="who" class="who"></span><span id="chain" class="pill">Checking audit log…</span><a class="btn" id="manage" href="/admin.html">Manage agents</a></span>
   </header>
+
+  <section id="gate" class="card hidden">
+    <div class="name">Private dashboard</div>
+    <p>Only the administrator and the people they authorise can see it. Enter the access code you received.</p>
+    <input id="g-code" type="password" autocomplete="current-password" placeholder="agv_…">
+    <button class="primary" id="g-btn">Open the dashboard</button>
+    <div class="msg" id="g-msg"></div>
+    <p style="margin-top:14px">Administrator? <a href="/admin.html">Sign in on the admin page</a>.</p>
+  </section>
+
+  <div id="content">
 
   <section class="kpis">
     <div class="card kpi"><div class="v" id="k-spent">–</div><div class="l">Spent today</div></div>
@@ -99,6 +118,7 @@
     </table>
     <div id="empty" class="empty">No payments yet. Run the agent to see activity here.</div>
   </section>
+  </div>
 </main>
 <script>
 const eur = v => '€' + v.toFixed(2)
@@ -141,11 +161,40 @@ async function download(url, fallbackName, open) {
 document.getElementById('btn-datev').onclick = () => download('/v1/export/datev', 'datev.csv', false)
 document.getElementById('btn-statement').onclick = () => download('/v1/export/statement', 'statement.html', true)
 
-function showLocked() {
-  const chain = document.getElementById('chain')
-  chain.className = 'pill warn'
-  chain.innerHTML = 'Locked: <a href="/admin.html">sign in on the admin page</a>'
+// Tableau de bord privé : on demande un code d'accès (créé par l'administrateur) ou le mot de passe admin
+const $ = id => document.getElementById(id)
+const setToken = t => { try { t ? sessionStorage.setItem('agp-token', t) : sessionStorage.removeItem('agp-token') } catch {} }
+function showLocked(msg = '') {
+  $('content').classList.add('hidden'); $('gate').classList.remove('hidden')
+  $('chain').classList.add('hidden'); $('manage').classList.add('hidden'); $('who').textContent = ''
+  if (msg) $('g-msg').textContent = msg
 }
+async function openSession() {
+  const s = await fetch('/v1/session', { headers: { 'X-Admin-Token': adminToken() } }).then(r => r.json()).catch(() => ({ role: 'public' }))
+  if (s.role === 'none') return showLocked()
+  $('gate').classList.add('hidden'); $('content').classList.remove('hidden'); $('chain').classList.remove('hidden')
+  const viewer = s.role === 'viewer'
+  // Une personne autorisée consulte seulement : pas d'administration, pas d'ancrage (qui dépense des satoshis)
+  $('manage').classList.toggle('hidden', viewer)
+  $('anchor-btn').classList.toggle('hidden', viewer)
+  $('who').innerHTML = viewer ? `Viewing as <b>${esc(s.name)}</b> · <a href="#" id="signout">sign out</a>`
+    : s.role === 'admin' ? `Administrator · <a href="#" id="signout">sign out</a>` : ''
+  const so = $('signout')
+  if (so) so.onclick = e => { e.preventDefault(); setToken(''); location.reload() }
+  return refresh()
+}
+async function signIn() {
+  const code = $('g-code').value.trim()
+  if (!code) return ($('g-msg').textContent = 'Enter your access code')
+  setToken(code)
+  const s = await fetch('/v1/session', { headers: { 'X-Admin-Token': code } }).then(r => r.json()).catch(() => ({}))
+  if (s.role === 'none') { setToken(''); return ($('g-msg').textContent = 'This code is not valid or has been revoked') }
+  $('g-code').value = ''; $('g-msg').textContent = ''
+  openSession()
+}
+$('g-btn').onclick = signIn
+$('g-code').onkeydown = e => { if (e.key === 'Enter') signIn() }
+$('g-code').oninput = () => { $('g-msg').textContent = '' }
 
 async function refresh() {
   try {
@@ -204,7 +253,7 @@ async function refresh() {
     }).join('')
     seen = Math.max(seen, ...ledger.map(e => e.seq), 0)
   } catch (err) {
-    if (err.locked) return showLocked()
+    if (err.locked) { const had = adminToken(); setToken(''); return showLocked(had ? 'Your access has expired or been revoked' : '') }
     document.getElementById('chain').className = 'pill bad'
     document.getElementById('chain').textContent = 'Proxy unreachable'
   }
@@ -217,8 +266,8 @@ async function anchorNow() {
     if (r.error) { b.textContent = 'Anchor failed'; console.error(r.error); await new Promise(r => setTimeout(r, 2000)) }
   } finally { b.disabled = false; b.textContent = 'Anchor now'; refresh() }
 }
-refresh()
-setInterval(refresh, 2000)
+openSession()
+setInterval(() => { if ($('gate').classList.contains('hidden')) refresh() }, 2000)
 </script>
 </body>
 </html>

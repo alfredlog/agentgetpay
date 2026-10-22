@@ -52,10 +52,12 @@ sudo systemctl reload caddy                         # apply it; the HTTPS certif
 
 Demo keys (`dev-…`) are refused in public mode. Open `https://agentpay.pdf-libre.de/admin.html`, sign in with the admin password, and click **New API key** for each agent you use.
 
+To let someone else **view** the dashboard (your accountant, a manager), use **Dashboard access** on the admin page: it creates a read-only access code, shown once, that you can revoke at any time.
+
 ## 7. Check
 
 ```bash
-curl -s https://agentpay.pdf-libre.de/v1/stats | head -c 200     # dashboard data (public read)
+curl -s -o /dev/null -w "%{http_code}\n" https://agentpay.pdf-libre.de/v1/stats   # 401: the dashboard is private
 curl -s -o /dev/null -w "%{http_code}\n" https://agentpay.pdf-libre.de/v1/export/datev   # 401: protected
 ```
 

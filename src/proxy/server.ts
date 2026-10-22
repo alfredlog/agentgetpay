@@ -16,6 +16,7 @@ import { AnchorLog, BsvAnchorRail, verifyAgainstChain, cachedWocFetch, FetchTxHe
 import { Mutex } from '../shared/mutex.js'
 import { DatevExporter, loadAccountingConfig, monthlyStatementHtml } from './accounting.js'
 import { AgentRegistry, validateRules, validAgentId } from './registry.js'
+import { ViewerStore, validViewerName } from './viewers.js'
 import type { Broadcaster } from '@bsv/sdk'
 import { decode, PaymentRequired } from '../shared/x402.js'
 
@@ -35,6 +36,7 @@ const PUBLIC_HOST = (process.env.PROXY_PUBLIC_HOST ?? '').trim().toLowerCase()
 const PUBLIC_READ = truthy(process.env.DASHBOARD_PUBLIC_READ)
 
 const registry = new AgentRegistry()
+const viewers = new ViewerStore() // personnes autorisées à consulter le tableau de bord
 const budget = new MemoryBudgetStore()
 const policy = new JsonPolicyEngine(registry, budget, EUR_PER_SAT)
 
@@ -57,11 +59,19 @@ const approvals: ApprovalChannel = process.env.TELEGRAM_BOT_TOKEN && process.env
   : new AutoApprovalChannel(process.env.APPROVAL_AUTO === 'approved' ? 'approved' : 'rejected')
 
 // Mot de passe administrateur (comparaison en temps constant)
-function requireAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
+const isAdmin = (req: express.Request) => {
   const given = Buffer.from(String(req.get('X-Admin-Token') ?? ''))
   const expected = Buffer.from(ADMIN_TOKEN)
-  if (given.length !== expected.length || !timingSafeEqual(given, expected)) return res.status(401).json({ error: 'Wrong admin password' })
+  return given.length === expected.length && timingSafeEqual(given, expected)
+}
+function requireAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
+  if (!isAdmin(req)) return res.status(401).json({ error: 'Wrong admin password' })
   next()
+}
+// Lecture du tableau de bord : l'administrateur, ou une personne qui a reçu un code d'accès (agv_…)
+function requireReader(req: express.Request, res: express.Response, next: express.NextFunction) {
+  if (isAdmin(req) || viewers.authenticate(String(req.get('X-Admin-Token') ?? ''))) return next()
+  res.status(401).json({ error: 'Access code required' })
 }
 
 // Vérifie l'adresse demandée par un agent. Renvoie la raison du refus, ou undefined si c'est autorisé.
@@ -251,9 +261,21 @@ export function createProxy(
   })
 
   // Données du tableau de bord : protégées par le mot de passe admin si le proxy est ouvert au réseau
+  // Par défaut : seuls l'administrateur et les personnes qu'il a autorisées voient le tableau de bord et les exports.
+  // L'ancrage (qui dépense des satoshis) reste réservé à l'administrateur.
   if (EXPOSED) {
-    app.use(PUBLIC_READ ? ['/v1/export', '/v1/anchor'] : ['/v1/ledger', '/v1/stats', '/v1/export', '/v1/anchor'], requireAdmin)
+    app.use(PUBLIC_READ ? ['/v1/export'] : ['/v1/ledger', '/v1/stats', '/v1/export'], requireReader)
+    app.use('/v1/anchor', requireAdmin)
   }
+
+  // Qui est connecté ? (le tableau de bord affiche le nom et cache les boutons réservés à l'admin)
+  app.get('/v1/session', (req, res) => {
+    const token = String(req.get('X-Admin-Token') ?? '')
+    if (isAdmin(req)) return res.json({ role: 'admin' })
+    const v = token ? viewers.authenticate(token) : undefined
+    if (v) return res.json({ role: 'viewer', name: v.name })
+    res.json({ role: EXPOSED && !PUBLIC_READ ? 'none' : 'public' })
+  })
 
   // Pour le tableau de bord
   app.get('/v1/ledger', async (_req, res) => res.json(await ledger.all()))
@@ -360,6 +382,23 @@ export function createProxy(
       res.json({ ok: true, apiKey })
     } catch (e) { res.status(400).json({ error: (e as Error).message }) }
   })
+  // Accès au tableau de bord (lecture seule) pour les personnes autorisées
+  const viewerLog = (req: express.Request, change: string) =>
+    record({ agentId: 'dashboard-access', url: 'admin://dashboard-access', amountSats: 0, amountEur: 0, decision: 'admin', reason: change, approvedBy: who(req) })
+  admin.get('/viewers', (_req, res) => res.json(viewers.list()))
+  admin.post('/viewers', async (req, res) => {
+    const name = req.body?.name
+    if (!validViewerName(name)) return res.status(400).json({ error: 'Name: 2–40 characters' })
+    const { viewer, code } = viewers.create(String(name).trim(), who(req))
+    await viewerLog(req, `Dashboard access granted to ${viewer.name}`)
+    res.json({ ok: true, viewer, code })
+  })
+  admin.delete('/viewers/:id', async (req, res) => {
+    const v = viewers.revoke(req.params.id)
+    if (!v) return res.status(404).json({ error: 'Unknown access' })
+    await viewerLog(req, `Dashboard access revoked for ${v.name}`)
+    res.json({ ok: true })
+  })
   app.use('/v1/admin', admin)
 
   // Export comptable du mois (par défaut : le mois en cours)
@@ -388,7 +427,7 @@ export function createProxy(
 if (process.argv[1]?.endsWith('server.ts')) {
   createProxy().listen(PORT, HOST, () => {
     console.log(`Payment proxy ready on http://localhost:${PORT} — dashboard: http://localhost:${PORT}`)
-    if (EXPOSED) console.log(`⚠ Public mode${PUBLIC_HOST ? ` (${PUBLIC_HOST})` : ''}: ${PUBLIC_READ ? 'dashboard readable by anyone, exports and admin need' : 'dashboard needs'} the admin password; demo API keys are disabled`)
+    if (EXPOSED) console.log(`⚠ Public mode${PUBLIC_HOST ? ` (${PUBLIC_HOST})` : ''}: ${PUBLIC_READ ? 'dashboard readable by anyone' : 'dashboard only for the admin and people given an access code'}; admin page needs the admin password; demo API keys are disabled`)
     else console.log('Only reachable from this computer (set PROXY_HOST=0.0.0.0 to open it to the network)')
   })
 }

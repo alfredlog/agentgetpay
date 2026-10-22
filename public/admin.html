@@ -88,6 +88,16 @@
       <div id="n-msg" class="msg"></div>
       <div id="n-key"></div>
     </section>
+
+    <h2>Dashboard access</h2>
+    <section class="card" style="max-width:560px">
+      <div class="meta" style="margin-bottom:10px">People who can <b>view</b> the dashboard and download the exports (for example your accountant). They cannot change agents or rules.</div>
+      <div id="v-list"></div>
+      <label>Name<input id="v-name" placeholder="Steuerberater Müller"></label>
+      <button class="primary" id="v-btn">Give access</button>
+      <div id="v-msg" class="msg"></div>
+      <div id="v-code"></div>
+    </section>
   </div>
 </main>
 
@@ -135,7 +145,36 @@ async function load() {
   $('logout').onclick = e => { e.preventDefault(); store.del('agp-token'); auth.token = ''; showLogin() }
   $('agents').innerHTML = agents.map(card).join('')
   for (const a of agents) wire(a)
+  await loadViewers()
 }
+
+// Accès au tableau de bord en lecture seule
+async function loadViewers() {
+  const list = await api('/viewers')
+  $('v-list').innerHTML = list.length ? list.map(v => `<div class="top" style="padding:6px 0;border-bottom:1px solid var(--line)">
+      <span><b>${esc(v.name)}</b> <span class="hint">· code …${esc(v.keyHint)} · since ${new Date(v.createdAt).toLocaleDateString()}</span></span>
+      <button class="danger" data-revoke="${esc(v.id)}">Revoke</button></div>`).join('')
+    : '<div class="hint" style="margin-bottom:10px">Nobody else has access yet.</div>'
+  $('v-list').querySelectorAll('[data-revoke]').forEach(b => b.onclick = async () => {
+    b.disabled = true
+    try { await api('/viewers/' + b.dataset.revoke, 'DELETE'); $('v-code').innerHTML = ''; await loadViewers() }
+    catch (e) { b.disabled = false; if (e.message !== 'unauthorized') { $('v-msg').className = 'msg bad'; $('v-msg').textContent = e.message } }
+  })
+}
+$('v-btn').onclick = async () => {
+  const b = $('v-btn'), m = $('v-msg')
+  const name = $('v-name').value.trim()
+  if (!name) { m.className = 'msg bad'; m.textContent = 'Enter the name of the person'; return }
+  b.disabled = true; $('v-code').innerHTML = ''
+  try {
+    const r = await api('/viewers', 'POST', { name })
+    m.className = 'msg ok'; m.textContent = `Access given to ${r.viewer.name}`
+    $('v-code').innerHTML = `<div class="key">Access code for <b>${esc(r.viewer.name)}</b>, shown <b>only once</b>. Send it with the dashboard link:<br><code>${esc(r.code)}</code></div>`
+    $('v-name').value = ''
+    await loadViewers()
+  } catch (e) { if (e.message !== 'unauthorized') { m.className = 'msg bad'; m.textContent = e.message } } finally { b.disabled = false }
+}
+$('v-name').oninput = () => { $('v-msg').textContent = '' }
 
 function card(a) {
   const r = a.rules || { daily_budget_eur: 0, max_per_payment_eur: 0, approval_above_eur: 0, allowed_domains: [] }
