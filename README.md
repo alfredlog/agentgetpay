@@ -105,6 +105,8 @@ npm run mcp:config -- <api-key> # same, for an agent whose key was issued on the
 
 Under the hood: OAuth 2.1 with discovery (RFC 9728, RFC 8414), dynamic client registration (RFC 7591), mandatory PKCE (S256), 1-hour access tokens, rotating refresh tokens, hashed storage, 10 wrong codes per 15 minutes per IP. Test: `npm run test:oauth` (uses the official MCP client).
 
+**Files with a remote assistant.** A connected assistant cannot read files from the user's computer. When a file is needed, it calls `request_file_upload` and gives the user a private link (valid 15 minutes) to drop the file; every file it produces comes with a private download link (valid 24 hours). Each agent has its own folder; files are limited to 25 MB each and 200 MB per agent (`MCP_MAX_FILE_MB`, `MCP_MAX_WORKSPACE_MB`). Test: `npm run test:files`.
+
 **Files:** the assistant only sees the `workspace/` folder. In a request body, `{"$file": "invoice.pdf"}` is replaced by the file's content; files received (for example a compressed PDF) are saved in `workspace/out/`. Paths outside the folder and symbolic links pointing outside are refused.
 
 Payments above the approval threshold wait up to 2 minutes for the human; some assistants stop waiting for a tool earlier.
@@ -171,6 +173,7 @@ Daily spending is rebuilt from the audit log when the proxy starts, so restartin
 | `npm run mcp` / `npm run mcp:http` | MCP server for AI assistants (local / HTTP on port 5070) |
 | `npm run mcp:config` | Print the MCP configuration to paste into an assistant |
 | `npm run test:oauth` | Test the OAuth connection of assistants, offline |
+| `npm run test:files` | Test upload and download links for remote assistants, offline |
 | `npm run test:local`, `npm run test:proxy` | Offline tests with a fake wallet |
 
 Code comments are in French.

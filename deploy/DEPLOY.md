@@ -41,7 +41,7 @@ pm2 logs agentgetpay-proxy --lines 20   # note the admin password printed on fir
 
 ## 5. Caddy
 
-Add the block from `deploy/Caddyfile.example` to `/etc/caddy/Caddyfile`, then:
+Add the block from `deploy/Caddyfile.example` to `/etc/caddy/Caddyfile` (it routes `/mcp` and `/files/*` to the MCP server, everything else to the proxy), then:
 
 ```bash
 sudo caddy validate --config /etc/caddy/Caddyfile   # check the file

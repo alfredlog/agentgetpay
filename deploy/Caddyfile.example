@@ -8,6 +8,14 @@ agentpay.pdf-libre.de {
 		reverse_proxy 127.0.0.1:5070
 	}
 
+	# Liens de dépôt et de téléchargement de fichiers pour les assistants connectés
+	handle /files/* {
+		request_body {
+			max_size 30MB
+		}
+		reverse_proxy 127.0.0.1:5070
+	}
+
 	# Proxy de paiement, tableau de bord et administration
 	handle {
 		reverse_proxy 127.0.0.1:5050

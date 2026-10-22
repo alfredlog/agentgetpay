@@ -22,7 +22,8 @@
     "mcp": "tsx src/mcp/server.ts",
     "mcp:http": "MCP_TRANSPORT=http tsx src/mcp/server.ts",
     "mcp:config": "tsx src/mcp/print-config.ts",
-    "test:oauth": "tsx src/test/oauth-flow.ts"
+    "test:oauth": "tsx src/test/oauth-flow.ts",
+    "test:files": "tsx src/test/files-flow.ts"
   },
   "dependencies": {
     "@bsv/sdk": "^3.2.1",
