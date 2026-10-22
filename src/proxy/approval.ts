@@ -28,7 +28,7 @@ export class TelegramApprovalChannel implements ApprovalChannel {
     }
   }
 
-  async requestApproval(req: PaymentRequest, reason: string): Promise<Result> {
+  async requestApproval(req: PaymentRequest, reason: string, signal?: AbortSignal): Promise<Result> {
     const id = Math.random().toString(36).slice(2, 10)
     const text = [
       '🔔 Approval requested',
@@ -50,8 +50,21 @@ export class TelegramApprovalChannel implements ApprovalChannel {
     if (!sent) return { status: 'rejected', by: 'Telegram error (message not sent)' }
 
     return new Promise<Result>(resolve => {
-      const timer = setTimeout(() => { this.pending.delete(id); resolve({ status: 'timeout' }) }, this.timeoutMs)
-      this.pending.set(id, r => { clearTimeout(timer); resolve(r) })
+      const finish = (r: Result) => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); this.pending.delete(id); resolve(r) }
+      const timer = setTimeout(() => {
+        finish({ status: 'timeout' })
+        void this.call('editMessageText', { chat_id: this.chatId, message_id: sent.message_id, text: `${text}\n\n⌛ No answer: payment refused` })
+      }, this.timeoutMs)
+      // Décision prise sur le tableau de bord : on met le message à jour et on retire les boutons
+      const onAbort = () => {
+        if (!this.pending.has(id)) return
+        const r = (signal?.reason ?? {}) as Result
+        finish(r)
+        const outcome = r.status === 'approved' ? `✅ Approved by ${r.by}` : r.status === 'rejected' ? `❌ Rejected by ${r.by}` : '⌛ Closed'
+        void this.call('editMessageText', { chat_id: this.chatId, message_id: sent.message_id, text: `${text}\n\n${outcome}` })
+      }
+      this.pending.set(id, finish)
+      signal?.addEventListener('abort', onAbort)
     })
   }
 
@@ -85,12 +98,29 @@ export class TelegramApprovalChannel implements ApprovalChannel {
     }
   }
 
-  private async call(method: string, body: object) {
-    const res = await fetch(`${this.api}/${method}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+  // Renvoie le résultat de Telegram (ex. le message envoyé), ou undefined en cas d'erreur
+  private async call(method: string, body: object): Promise<any> {
+    try {
+      const res = await fetch(`${this.api}/${method}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+      })
+      if (!res.ok) { console.error(`Telegram ${method} :`, await res.text()); return undefined }
+      return ((await res.json()) as { result?: unknown }).result ?? true
+    } catch (e) {
+      console.error(`Telegram ${method} unreachable:`, (e as Error).message)
+      return undefined
+    }
+  }
+}
+
+// --- Sans Telegram : on attend une décision sur le tableau de bord ---
+export class DashboardOnlyApprovalChannel implements ApprovalChannel {
+  constructor(private timeoutMs = 120_000) {}
+  requestApproval(_req: PaymentRequest, _reason: string, signal?: AbortSignal): Promise<Result> {
+    return new Promise(resolve => {
+      const timer = setTimeout(() => resolve({ status: 'timeout' }), this.timeoutMs)
+      signal?.addEventListener('abort', () => { clearTimeout(timer); resolve((signal.reason ?? { status: 'timeout' }) as Result) })
     })
-    if (!res.ok) console.error(`Telegram ${method} :`, await res.text())
-    return res.ok
   }
 }
 

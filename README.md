@@ -6,7 +6,7 @@ Companies want AI agents that can pay for APIs and data on their own, but no fin
 - **Every payment is checked before it is signed:** daily budget, max per payment, allowed domains.
 - **Works with any AI assistant** through an MCP server: the assistant decides what to buy, the company's rules decide what gets paid.
 - **Finance manages each agent** from an admin page: budgets, limits, suspension, API keys.
-- **A human approves large payments** from their phone (Telegram), and their name is recorded.
+- **A human approves large payments** from their phone (Telegram) or from the dashboard, whichever answers first, and their name is recorded.
 - **Finance gets a DATEV export** and a monthly statement, one booking per payment.
 - **Every decision is logged** in a hash-chained audit log, **anchored on the BSV blockchain** so anyone can prove it was never altered.
 - **Payments are micropayments over HTTP 402**, following the [BRC-166](https://github.com/bsv-blockchain/BRCs/blob/master/payments/0166.md) standard (x402 on BSV).
@@ -51,7 +51,7 @@ Send testnet coins to the address it prints (for example from [scrypt.io/faucet]
 npm run balance
 ```
 
-Optional, for phone approvals: create a bot with @BotFather on Telegram, add `TELEGRAM_BOT_TOKEN=...` to `.env`, send "hello" to your bot, then run `npm run telegram:setup`. Without Telegram, approvals are rejected automatically.
+Optional, for phone approvals: create a bot with @BotFather on Telegram, add `TELEGRAM_BOT_TOKEN=...` to `.env`, send "hello" to your bot, then run `npm run telegram:setup`. Approvals can always be given on the dashboard too (✅ Approve / ❌ Reject on the waiting request; on a public server, only the administrator sees these buttons). Without Telegram, the dashboard is the only way to approve; a request with no answer after 2 minutes is refused. `APPROVAL_AUTO=approved|rejected` answers automatically, for tests.
 
 **Never commit or share `.env`**: it holds the wallet key.
 
