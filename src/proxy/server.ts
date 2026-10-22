@@ -11,7 +11,7 @@ import { MemoryBudgetStore } from './budget.js'
 import { EnvKeyStore } from './keystore.js'
 import { JsonlLedger } from './ledger.js'
 import { Decision, ApprovalChannel } from './types.js'
-import { TelegramApprovalChannel, AutoApprovalChannel } from './approval.js'
+import { TelegramApprovalChannel, AutoApprovalChannel, DashboardOnlyApprovalChannel } from './approval.js'
 import { AnchorLog, BsvAnchorRail, verifyAgainstChain, cachedWocFetch, FetchTxHex, Anchor } from './anchor.js'
 import { Mutex } from '../shared/mutex.js'
 import { DatevExporter, loadAccountingConfig, monthlyStatementHtml } from './accounting.js'
@@ -57,10 +57,13 @@ budget.restoreFrom(ledger.allSync()) // les dépenses du jour survivent à un re
 const anchorLog = new AnchorLog('data/anchors.jsonl')
 const ANCHOR_EVERY = Number(process.env.ANCHOR_EVERY ?? 5) // ancrer sur BSV toutes les N entrées du journal
 
-// Telegram si configuré, sinon validation automatique (APPROVAL_AUTO=approved|rejected) pour les tests
-const approvals: ApprovalChannel = process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID
-  ? new TelegramApprovalChannel(process.env.TELEGRAM_BOT_TOKEN, process.env.TELEGRAM_CHAT_ID)
-  : new AutoApprovalChannel(process.env.APPROVAL_AUTO === 'approved' ? 'approved' : 'rejected')
+// Validation humaine : Telegram si configuré ; on peut TOUJOURS aussi décider sur le tableau de bord.
+// Sans Telegram, seul le tableau de bord décide. APPROVAL_AUTO=approved|rejected : réponse automatique (tests).
+const approvals: ApprovalChannel = process.env.APPROVAL_AUTO
+  ? new AutoApprovalChannel(process.env.APPROVAL_AUTO === 'approved' ? 'approved' : 'rejected')
+  : process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID
+    ? new TelegramApprovalChannel(process.env.TELEGRAM_BOT_TOKEN, process.env.TELEGRAM_CHAT_ID)
+    : new DashboardOnlyApprovalChannel()
 
 // Mot de passe administrateur (comparaison en temps constant)
 const isAdmin = (req: express.Request) => {
@@ -148,7 +151,9 @@ export function createProxy(
   app.use(express.static('public')) // le tableau de bord : http://localhost:5050
 
   // Validations en attente, pour les afficher en direct sur le tableau de bord
-  const pending = new Map<number, { agentId: string; amountEur: number; url: string; purpose?: string; since: string }>()
+  const pending = new Map<number, { id: number; agentId: string; amountEur: number; url: string; purpose?: string; reason: string; since: string }>()
+  // Décisions prises sur le tableau de bord, pour chaque demande en attente
+  const dashboardDecide = new Map<number, (r: { status: 'approved' | 'rejected'; by: string }) => void>()
   let pendingSeq = 0
 
   // L'agent s'identifie avec sa clé d'API (jamais avec une clé de portefeuille)
@@ -248,8 +253,13 @@ export function createProxy(
           if (decision.kind === 'needs_approval') {
             console.log(`⏳ ${agent.id} is waiting for approval of ${fmt(amountEur)}…`)
             const pid = ++pendingSeq
-            pending.set(pid, { agentId: agent.id, amountEur, url, purpose, since: new Date().toISOString() })
-            const answer = await approvals.requestApproval(payReq, decision.reason).finally(() => pending.delete(pid))
+            pending.set(pid, { id: pid, agentId: agent.id, amountEur, url, purpose, reason: decision.reason, since: new Date().toISOString() })
+            // Le premier qui répond gagne : Telegram ou le tableau de bord
+            const ctl = new AbortController()
+            const fromDashboard = new Promise<{ status: 'approved' | 'rejected'; by: string }>(resolve =>
+              dashboardDecide.set(pid, r => { ctl.abort(r); resolve(r) }))
+            const answer = await Promise.race([approvals.requestApproval(payReq, decision.reason, ctl.signal), fromDashboard])
+              .finally(() => { pending.delete(pid); dashboardDecide.delete(pid) })
             if (answer.status !== 'approved') {
               decision = { kind: 'deny', reason: answer.status === 'timeout' ? 'No answer to the approval request' : `Rejected by ${answer.by}` }
               return false
@@ -303,7 +313,7 @@ export function createProxy(
     if (isAdmin(req)) return res.json({ role: 'admin' })
     const v = token ? viewers.authenticate(token) : undefined
     if (v) return res.json({ role: 'viewer', name: v.name })
-    res.json({ role: EXPOSED && !PUBLIC_READ ? 'none' : 'public' })
+    res.json({ role: !EXPOSED ? 'local' : PUBLIC_READ ? 'public' : 'none' })
   })
 
   // Pour le tableau de bord
@@ -411,6 +421,17 @@ export function createProxy(
       res.json({ ok: true, apiKey })
     } catch (e) { res.status(400).json({ error: (e as Error).message }) }
   })
+  // Validation depuis le tableau de bord (réservée à l'administrateur)
+  // Sur cet ordinateur seulement (proxy non exposé), pas besoin du mot de passe pour décider
+  app.post('/v1/admin/approvals/:id', (req, res, next) => EXPOSED ? requireAdmin(req, res, next) : next(), (req, res) => {
+    const decide = dashboardDecide.get(Number(req.params.id))
+    if (!decide) return res.status(404).json({ error: 'This request is no longer waiting (already decided or expired)' })
+    const approved = req.body?.approve === true
+    decide({ status: approved ? 'approved' : 'rejected', by: `${who(req)} (dashboard)` })
+    console.log(`${approved ? '✅' : '❌'} ${who(req)} ${approved ? 'approved' : 'rejected'} request #${req.params.id} on the dashboard`)
+    res.json({ ok: true })
+  })
+
   // Connexion d'un assistant IA : code à usage unique pour un agent
   admin.post('/agents/:id/pairing', async (req, res) => {
     const id = req.params.id

@@ -60,5 +60,6 @@ export interface Ledger {
 
 // Demande l'accord d'un humain. Hackathon : Telegram. Entreprise : Microsoft Teams.
 export interface ApprovalChannel {
-  requestApproval(req: PaymentRequest, reason: string): Promise<{ status: 'approved' | 'rejected' | 'timeout'; by?: string }>
+  // signal : déclenché si la décision a été prise ailleurs (tableau de bord) ; signal.reason = cette décision
+  requestApproval(req: PaymentRequest, reason: string, signal?: AbortSignal): Promise<{ status: 'approved' | 'rejected' | 'timeout'; by?: string }>
 }
