@@ -61,7 +61,10 @@ curl -s -o /dev/null -w "%{http_code}\n" https://agentpay.pdf-libre.de/v1/stats 
 curl -s -o /dev/null -w "%{http_code}\n" https://agentpay.pdf-libre.de/v1/export/datev   # 401: protected
 ```
 
-MCP clients connect to `https://agentpay.pdf-libre.de/mcp` with `Authorization: Bearer <agent API key>`.
+MCP clients connect to `https://agentpay.pdf-libre.de/mcp`:
+
+- **Claude, ChatGPT…** (connectors with OAuth): on the admin page, click **Connect an assistant** on an agent, add the connector URL in the assistant, click **Connect** and type the code.
+- **Agents and scripts**: send `Authorization: Bearer <agent API key>`.
 
 ## Update later
 
