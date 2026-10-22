@@ -30,6 +30,8 @@ interface WocUnspent extends Utxo { isSpentInMempoolTx?: boolean }
 export async function getUtxos(address: string): Promise<Utxo[]> {
   const lists = await Promise.all(['confirmed', 'unconfirmed'].map(async kind => {
     const res = await wocFetch(`${WOC}/address/${address}/${kind}/unspent`)
+    // Une adresse toute neuve, qui n'a jamais rien reçu, est inconnue de WhatsOnChain : 404 = aucune pièce.
+    if (res.status === 404) return []
     if (!res.ok) throw new Error(`WhatsOnChain responded ${res.status}`)
     const body = (await res.json()) as { result?: WocUnspent[] }
     return body.result ?? []
