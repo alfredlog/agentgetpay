@@ -6,7 +6,9 @@ import { appendFileSync, readFileSync } from 'node:fs'
 const token = process.env.TELEGRAM_BOT_TOKEN
 if (!token) throw new Error('Add TELEGRAM_BOT_TOKEN=... to .env (from @BotFather)')
 
-const res = await fetch(`https://api.telegram.org/bot${token}/getUpdates`)
+// allowed_updates=["message"] : le proxy demande à Telegram de ne lui envoyer que les clics sur les boutons,
+// et Telegram garde ce réglage. On redemande explicitement les messages, sinon "bonjour" resterait invisible.
+const res = await fetch(`https://api.telegram.org/bot${token}/getUpdates?allowed_updates=${encodeURIComponent('["message","callback_query"]')}`)
 const data = (await res.json()) as { ok: boolean; result: any[]; description?: string }
 if (!data.ok) throw new Error(`Token rejected by Telegram: ${data.description}`)
 
