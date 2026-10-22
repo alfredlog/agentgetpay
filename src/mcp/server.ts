@@ -18,6 +18,7 @@
 // le contenu du fichier ; les fichiers reçus (PDF…) sont enregistrés dans workspace/out/.
 import 'dotenv/config'
 import { readFile, writeFile, mkdir, readdir, stat, realpath } from 'node:fs/promises'
+import { existsSync, readFileSync } from 'node:fs'
 import { resolve, relative, join, basename, extname, sep } from 'node:path'
 import express from 'express'
 import { z } from 'zod'
@@ -125,7 +126,8 @@ function buildServer(apiKey: string, ctx: Ctx = { ws: WORKSPACE }) {
   const server = new McpServer({ name: 'agentgetpay', version: '1.0.0' }, {
     instructions:
       'AgentGetPay lets you buy paid online services (HTTP 402, paid in BSV) within your company\'s rules. ' +
-      'Before buying, call check_budget, then get_price for each paid call. Always give a clear purpose: it is ' +
+      'Use these tools, never a web browser, for any paid service: payments must go through the company\'s spend control. ' +
+      'Call list_services to see the approved services and their addresses. Before buying, call check_budget, then get_price for each paid call. Always give a clear purpose: it is ' +
       'stored in the audit log. Payments above the approval threshold wait for a human to approve them on their ' +
       'phone or on the dashboard (up to 2 minutes). If a payment is refused, explain the reason to the user instead of retrying. ' +
       'To send a file, use {"$file": "name.pdf"} in the body; received files are saved in out/. ' +
@@ -137,6 +139,22 @@ function buildServer(apiKey: string, ctx: Ctx = { ws: WORKSPACE }) {
   })
   // Lien de téléchargement pour un fichier du dossier (mode connecteur)
   const download = (file: string) => links ? links.downloadLink(ws, file, ctx.agentId ?? 'agent').url : undefined
+
+  // Catalogue des services approuvés par l'entreprise (config/services.json)
+  server.registerTool('list_services', {
+    title: 'List approved services',
+    description: 'Lists the paid services the company has approved (for example PDF compression and merging), with their API addresses and prices. Call this first when the user asks for something a paid service can do.',
+    annotations: { readOnlyHint: true, openWorldHint: true }
+  }, async () => {
+    const path = process.env.MCP_SERVICES ?? 'config/services.json'
+    const catalog: { name: string; description: string; discovery: string; example?: string }[] = existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : []
+    if (!catalog.length) return result('No service is listed in the catalog.')
+    const parts = await Promise.all(catalog.map(async s => {
+      const menu = await fetch(s.discovery, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() : undefined).catch(() => undefined)
+      return `## ${s.name}\n${s.description}\nAPI: ${s.discovery}${s.example ? `\nExample: ${s.example}` : ''}\n${menu ? `Endpoints and prices: ${short(JSON.stringify(menu))}` : '(price list unavailable right now)'}`
+    }))
+    return result(parts.join('\n\n'), { services: catalog })
+  })
 
   server.registerTool('check_budget', {
     title: 'Check budget',
@@ -177,7 +195,7 @@ function buildServer(apiKey: string, ctx: Ctx = { ws: WORKSPACE }) {
 
   server.registerTool('pay_and_fetch', {
     title: 'Pay and fetch',
-    description: 'Calls a service. If it asks for payment (HTTP 402), the company proxy checks your rules, may ask a human to approve, pays in BSV and returns the result. Free services are simply called. Every call is recorded in the audit log.',
+    description: 'Calls a service. If it asks for payment (HTTP 402), the company proxy checks your rules, may ask a human to approve, pays in BSV and returns the result. Free services are simply called. Every call is recorded in the audit log. Always use this tool for paid services, never a web browser: company payments must go through this spend control.',
     inputSchema: {
       url: z.string().url().describe('Full URL of the service'),
       method: z.enum(['GET', 'POST', 'PUT', 'DELETE']).default('GET'),
@@ -220,7 +238,7 @@ function buildServer(apiKey: string, ctx: Ctx = { ws: WORKSPACE }) {
   if (links) {
     server.registerTool('request_file_upload', {
       title: 'Ask the user for files',
-      description: 'Creates a private link (valid 15 minutes) where the user can upload files from their computer, e.g. a PDF to compress. Give the link to the user and wait until they confirm; the files then appear in in/ (see list_workspace_files) and can be sent with {"$file": "in/name.pdf"}.',
+      description: 'Use this whenever the user wants one of their files processed (e.g. "compress my invoice"), including a file attached to the chat, which you cannot forward yourself. Creates a private link (valid 15 minutes) where the user uploads the file. Give the link to the user and wait until they confirm; the files then appear in in/ (see list_workspace_files) and can be sent with {"$file": "in/name.pdf"}. Do not open a web browser for this.',
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false }
     }, async () => {
       const l = links.uploadLink(ws, ctx.agentId ?? 'agent')
