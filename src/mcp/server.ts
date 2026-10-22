@@ -13,29 +13,33 @@
 //       Sans identifiant valide, on répond 401 avec l'adresse de la connexion OAuth : l'assistant affiche « Connecter ».
 //
 // Fichiers : l'IA ne lit ni n'écrit librement sur le disque. Elle ne voit que le dossier de travail
-// (MCP_WORKSPACE, par défaut ./workspace). Dans un appel, {"$file": "facture.pdf"} est remplacé par
+// (MCP_WORKSPACE, par défaut ./workspace ; en mode http, un sous-dossier par agent). En mode http, l'assistant
+// travaille à distance : il donne à l'utilisateur un lien de dépôt (in/) et des liens de téléchargement (out/). Dans un appel, {"$file": "facture.pdf"} est remplacé par
 // le contenu du fichier ; les fichiers reçus (PDF…) sont enregistrés dans workspace/out/.
 import 'dotenv/config'
 import { readFile, writeFile, mkdir, readdir, stat, realpath } from 'node:fs/promises'
+import { existsSync, readFileSync } from 'node:fs'
 import { resolve, relative, join, basename, extname, sep } from 'node:path'
 import express from 'express'
 import { z } from 'zod'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
+import { FileLinks } from './file-links.js'
 
 const PROXY = (process.env.AGENTGETPAY_URL ?? 'http://127.0.0.1:5050').replace(/\/$/, '')
 const WORKSPACE = resolve(process.env.MCP_WORKSPACE ?? 'workspace')
 const MAX_FILE_MB = Number(process.env.MCP_MAX_FILE_MB ?? 25)
+const MAX_WORKSPACE_MB = Number(process.env.MCP_MAX_WORKSPACE_MB ?? 200) // par agent, en mode connecteur
 const MAX_TEXT = 20_000 // au-delà, la réponse est tronquée pour ne pas noyer l'IA
 const log = (...a: unknown[]) => console.error('[mcp]', ...a) // jamais stdout : c'est le canal du protocole en mode stdio
 
 // ---------------------------------------------------------------------------
 // Dossier de travail (bac à sable)
 // ---------------------------------------------------------------------------
-function inWorkspace(name: string): string {
-  const p = resolve(WORKSPACE, name)
-  const rel = relative(WORKSPACE, p)
+function inWorkspace(ws: string, name: string): string {
+  const p = resolve(ws, name)
+  const rel = relative(ws, p)
   if (!rel || rel.startsWith('..') || rel.split(sep).includes('..') || resolve(rel) === rel) {
     throw new Error(`"${name}" is outside the workspace folder`)
   }
@@ -43,43 +47,46 @@ function inWorkspace(name: string): string {
 }
 
 // Remplace {"$file": "nom"} par le contenu du fichier en base64
-async function attachFiles(value: unknown): Promise<unknown> {
-  if (Array.isArray(value)) return Promise.all(value.map(attachFiles))
+async function attachFiles(ws: string, value: unknown): Promise<unknown> {
+  if (Array.isArray(value)) return Promise.all(value.map(v => attachFiles(ws, v)))
   if (value && typeof value === 'object') {
     const obj = value as Record<string, unknown>
     if (typeof obj.$file === 'string' && Object.keys(obj).length === 1) {
-      const p = inWorkspace(obj.$file)
+      const p = inWorkspace(ws, obj.$file)
       const st = await stat(p).catch(() => undefined)
       if (!st?.isFile()) throw new Error(`File not found in the workspace: ${obj.$file}`)
       // Un lien symbolique ne doit pas mener hors du dossier de travail
       const real = await realpath(p)
-      if (relative(await realpath(WORKSPACE), real).startsWith('..')) throw new Error(`"${obj.$file}" points outside the workspace folder`)
+      if (relative(await realpath(ws), real).startsWith('..')) throw new Error(`"${obj.$file}" points outside the workspace folder`)
       if (st.size > MAX_FILE_MB * 1024 * 1024) throw new Error(`${obj.$file} is larger than ${MAX_FILE_MB} MB`)
       return (await readFile(p)).toString('base64')
     }
     const out: Record<string, unknown> = {}
-    for (const [k, v] of Object.entries(obj)) out[k] = await attachFiles(v)
+    for (const [k, v] of Object.entries(obj)) out[k] = await attachFiles(ws, v)
     return out
   }
   return value
 }
 
 // Enregistre les gros contenus base64 d'une réponse dans workspace/out/ et les remplace par {"$file": …}
-async function extractFiles(value: unknown, hint = 'result'): Promise<unknown> {
-  if (Array.isArray(value)) return Promise.all(value.map(v => extractFiles(v, hint)))
+async function extractFiles(ws: string, value: unknown, hint = 'result'): Promise<unknown> {
+  if (Array.isArray(value)) return Promise.all(value.map(v => extractFiles(ws, v, hint)))
   if (value && typeof value === 'object') {
     const obj = value as Record<string, unknown>
     const name = typeof obj.filename === 'string' ? basename(obj.filename) : hint
     const out: Record<string, unknown> = {}
-    for (const [k, v] of Object.entries(obj)) out[k] = await extractFiles(v, name)
+    for (const [k, v] of Object.entries(obj)) out[k] = await extractFiles(ws, v, name)
     return out
   }
   if (typeof value === 'string' && value.length > 2000 && /^[A-Za-z0-9+/=\r\n]+$/.test(value)) {
     const buf = Buffer.from(value, 'base64')
     const ext = buf.subarray(0, 5).toString('latin1') === '%PDF-' ? '.pdf' : extname(hint) || '.bin'
-    const file = `${basename(hint, extname(hint)) || 'result'}${ext}`
-    await mkdir(join(WORKSPACE, 'out'), { recursive: true })
-    await writeFile(join(WORKSPACE, 'out', file), buf)
+    // Jamais écraser un résultat précédent : rapport.pdf, rapport-2.pdf…
+    const stem = basename(hint, extname(hint)) || 'result'
+    await mkdir(join(ws, 'out'), { recursive: true })
+    let file = `${stem}${ext}`
+    for (let i = 2; await stat(join(ws, 'out', file)).then(() => true, () => false); i++) file = `${stem}-${i}${ext}`
+    await writeFile(join(ws, 'out', file), buf)
     return { $file: `out/${file}`, bytes: buf.length }
   }
   return value
@@ -110,15 +117,43 @@ const short = (s: string) => (s.length > MAX_TEXT ? `${s.slice(0, MAX_TEXT)}\n�
 
 // ---------------------------------------------------------------------------
 // Les outils, pour un agent donné (identifié par sa clé d'API)
+// ws : son dossier de travail. links : en mode connecteur, liens de dépôt et de téléchargement.
 // ---------------------------------------------------------------------------
-function buildServer(apiKey: string) {
+interface Ctx { ws: string; agentId?: string; links?: FileLinks }
+
+function buildServer(apiKey: string, ctx: Ctx = { ws: WORKSPACE }) {
+  const { ws, links } = ctx
   const server = new McpServer({ name: 'agentgetpay', version: '1.0.0' }, {
     instructions:
       'AgentGetPay lets you buy paid online services (HTTP 402, paid in BSV) within your company\'s rules. ' +
-      'Before buying, call check_budget, then get_price for each paid call. Always give a clear purpose: it is ' +
+      'Use these tools, never a web browser, for any paid service: payments must go through the company\'s spend control. ' +
+      'Call list_services to see the approved services and their addresses. Before buying, call check_budget, then get_price for each paid call. Always give a clear purpose: it is ' +
       'stored in the audit log. Payments above the approval threshold wait for a human to approve them on their ' +
-      'phone (up to 2 minutes). If a payment is refused, explain the reason to the user instead of retrying. ' +
-      'To send a file, put it in the workspace and use {"$file": "name.pdf"} in the body; received files are saved in out/.'
+      'phone or on the dashboard (up to 2 minutes). If a payment is refused, explain the reason to the user instead of retrying. ' +
+      'To send a file, use {"$file": "name.pdf"} in the body; received files are saved in out/. ' +
+      (links
+        ? 'You run remotely and cannot read files from the user\'s computer or from the chat. When the user wants a file of theirs processed, ' +
+          'call request_file_upload, give them the link, and wait until they say the upload is done; their files then appear in in/. ' +
+          'Always give the user the download link of each file you produce.'
+        : 'Files are taken from the workspace folder on this computer.')
+  })
+  // Lien de téléchargement pour un fichier du dossier (mode connecteur)
+  const download = (file: string) => links ? links.downloadLink(ws, file, ctx.agentId ?? 'agent').url : undefined
+
+  // Catalogue des services approuvés par l'entreprise (config/services.json)
+  server.registerTool('list_services', {
+    title: 'List approved services',
+    description: 'Lists the paid services the company has approved (for example PDF compression and merging), with their API addresses and prices. Call this first when the user asks for something a paid service can do.',
+    annotations: { readOnlyHint: true, openWorldHint: true }
+  }, async () => {
+    const path = process.env.MCP_SERVICES ?? 'config/services.json'
+    const catalog: { name: string; description: string; discovery: string; example?: string }[] = existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : []
+    if (!catalog.length) return result('No service is listed in the catalog.')
+    const parts = await Promise.all(catalog.map(async s => {
+      const menu = await fetch(s.discovery, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() : undefined).catch(() => undefined)
+      return `## ${s.name}\n${s.description}\nAPI: ${s.discovery}${s.example ? `\nExample: ${s.example}` : ''}\n${menu ? `Endpoints and prices: ${short(JSON.stringify(menu))}` : '(price list unavailable right now)'}`
+    }))
+    return result(parts.join('\n\n'), { services: catalog })
   })
 
   server.registerTool('check_budget', {
@@ -160,7 +195,7 @@ function buildServer(apiKey: string) {
 
   server.registerTool('pay_and_fetch', {
     title: 'Pay and fetch',
-    description: 'Calls a service. If it asks for payment (HTTP 402), the company proxy checks your rules, may ask a human to approve, pays in BSV and returns the result. Free services are simply called. Every call is recorded in the audit log.',
+    description: 'Calls a service. If it asks for payment (HTTP 402), the company proxy checks your rules, may ask a human to approve, pays in BSV and returns the result. Free services are simply called. Every call is recorded in the audit log. Always use this tool for paid services, never a web browser: company payments must go through this spend control.',
     inputSchema: {
       url: z.string().url().describe('Full URL of the service'),
       method: z.enum(['GET', 'POST', 'PUT', 'DELETE']).default('GET'),
@@ -170,18 +205,21 @@ function buildServer(apiKey: string) {
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
   }, async ({ url, method, body, purpose }) => {
     let payload: unknown
-    try { payload = body === undefined ? undefined : await attachFiles(body) } catch (e) { return result((e as Error).message, undefined, true) }
+    try { payload = body === undefined ? undefined : await attachFiles(ws, body) } catch (e) { return result((e as Error).message, undefined, true) }
     log(`${method} ${url} — ${purpose}`)
     const r = await proxy(apiKey, '/v1/fetch', { url, method, body: payload, purpose })
     if (!r.ok) {
       const reason = r.json?.reason ?? r.json?.error ?? `HTTP ${r.status}`
       return result(`Not done: ${reason}`, { status: r.status, decision: r.json?.decision, reason }, true)
     }
-    const data = r.json !== undefined ? await extractFiles(r.json) : undefined
+    const data = r.json !== undefined ? await extractFiles(ws, r.json) : undefined
     const head = r.paidSats ? `Paid ${r.paidSats} sats. ` : 'No payment needed. '
     const files = JSON.stringify(data ?? '').match(/"\$file":"[^"]+"/g)?.map(f => f.slice(9, -1)) ?? []
-    const text = head + (files.length ? `Files saved in the workspace: ${files.join(', ')}. ` : '') + '\n' + short(data !== undefined ? JSON.stringify(data, null, 2) : r.text)
-    return result(text, { paidSats: r.paidSats, status: r.status, ...(data && typeof data === 'object' && !Array.isArray(data) ? { response: data } : {}) })
+    const downloads = files.map(f => ({ file: f, url: download(f) })).filter(d => d.url)
+    const text = head + (files.length ? `Files saved: ${files.join(', ')}. ` : '') +
+      (downloads.length ? `\nDownload links for the user (valid 24 h):\n${downloads.map(d => `- ${d.file}: ${d.url}`).join('\n')}` : '') +
+      '\n' + short(data !== undefined ? JSON.stringify(data, null, 2) : r.text)
+    return result(text, { paidSats: r.paidSats, status: r.status, ...(downloads.length ? { downloads } : {}), ...(data && typeof data === 'object' && !Array.isArray(data) ? { response: data } : {}) })
   })
 
   server.registerTool('list_workspace_files', {
@@ -189,13 +227,38 @@ function buildServer(apiKey: string) {
     description: 'Lists the files you can send ({"$file": "name"}) and the files you received (in out/).',
     annotations: { readOnlyHint: true, openWorldHint: false }
   }, async () => {
-    await mkdir(join(WORKSPACE, 'out'), { recursive: true })
+    await mkdir(join(ws, 'out'), { recursive: true })
     const walk = async (dir: string): Promise<string[]> => (await Promise.all((await readdir(dir, { withFileTypes: true }))
       .filter(d => !d.name.startsWith('.'))
-      .map(d => d.isDirectory() ? walk(join(dir, d.name)) : Promise.resolve([relative(WORKSPACE, join(dir, d.name))])))).flat()
-    const files = await walk(WORKSPACE)
+      .map(d => d.isDirectory() ? walk(join(dir, d.name)) : Promise.resolve([relative(ws, join(dir, d.name))])))).flat()
+    const files = await walk(ws)
     return result(files.length ? files.join('\n') : 'The workspace is empty.', { files })
   })
+
+  if (links) {
+    server.registerTool('request_file_upload', {
+      title: 'Ask the user for files',
+      description: 'Use this whenever the user wants one of their files processed (e.g. "compress my invoice"), including a file attached to the chat, which you cannot forward yourself. Creates a private link (valid 15 minutes) where the user uploads the file. Give the link to the user and wait until they confirm; the files then appear in in/ (see list_workspace_files) and can be sent with {"$file": "in/name.pdf"}. Do not open a web browser for this.',
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false }
+    }, async () => {
+      const l = links.uploadLink(ws, ctx.agentId ?? 'agent')
+      return result(`Give this link to the user: ${l.url}\nIt expires in 15 minutes. Wait until they say the upload is done, then call list_workspace_files.`, l)
+    })
+
+    server.registerTool('get_download_link', {
+      title: 'Get a download link',
+      description: 'Creates a private download link (valid 24 hours) for a file in the workspace, so the user can get it, e.g. "out/report.pdf".',
+      inputSchema: { file: z.string().describe('Path in the workspace, e.g. out/report.pdf') },
+      annotations: { readOnlyHint: true, openWorldHint: false }
+    }, async ({ file }) => {
+      try {
+        const p = inWorkspace(ws, file)
+        if (!(await stat(p).catch(() => undefined))?.isFile()) return result(`File not found: ${file}`, undefined, true)
+        const l = links.downloadLink(ws, relative(ws, p), ctx.agentId ?? 'agent')
+        return result(`Download link for ${file} (valid 24 h): ${l.url}`, l)
+      } catch (e) { return result((e as Error).message, undefined, true) }
+    })
+  }
 
   return server
 }
@@ -209,10 +272,16 @@ if ((process.env.MCP_TRANSPORT ?? 'stdio') === 'http') {
   const HOST = process.env.MCP_HOST ?? '127.0.0.1'
   const PORT = Number(process.env.MCP_PORT ?? 5070)
   const app = express()
+  const publicHost = process.env.PROXY_PUBLIC_HOST?.trim()
+
+  // Liens de dépôt et de téléchargement (avant le lecteur JSON : un fichier déposé reste brut)
+  const publicBase = (process.env.MCP_PUBLIC_BASE ?? (publicHost ? `https://${publicHost}` : `http://127.0.0.1:${PORT}`)).replace(/\/$/, '')
+  const links = new FileLinks(publicBase, MAX_FILE_MB, MAX_WORKSPACE_MB)
+  app.use(links.router(log))
+
   app.use(express.json({ limit: '60mb' }))
 
   // Où se trouve la connexion OAuth (servie par le proxy, à son adresse publique)
-  const publicHost = process.env.PROXY_PUBLIC_HOST?.trim()
   const issuer = (process.env.OAUTH_ISSUER ?? (publicHost ? `https://${publicHost}` : PROXY)).replace(/\/$/, '')
   const resourceMetadata = `${issuer}/.well-known/oauth-protected-resource/mcp`
   const unauthorized = (res: express.Response, message: string, invalid = false) => res.status(401)
@@ -237,15 +306,19 @@ if ((process.env.MCP_TRANSPORT ?? 'stdio') === 'http') {
 
   // Le jeton est-il valable ? On demande au proxy (il connaît les clés d'agent et les jetons OAuth).
   // Petit cache de 30 s pour ne pas interroger le proxy à chaque message.
-  const valid = new Map<string, number>()
-  const checkToken = async (t: string) => {
-    if ((valid.get(t) ?? 0) > Date.now()) return true
+  // Renvoie l'agent lié au jeton, ou undefined si le jeton n'est pas valable.
+  const valid = new Map<string, { exp: number; agentId: string }>()
+  const checkToken = async (t: string): Promise<string | undefined> => {
+    const hit = valid.get(t)
+    if (hit && hit.exp > Date.now()) return hit.agentId
     const r = await fetch(`${PROXY}/v1/me`, { headers: { Authorization: `Bearer ${t}` } }).catch(() => undefined)
     if (!r) throw new Error('proxy unreachable')
-    if (r.status === 401) { valid.delete(t); return false }
+    if (r.status === 401) { valid.delete(t); return undefined }
+    const agentId = String(((await r.json().catch(() => ({}))) as { agentId?: string }).agentId ?? '')
+    if (!/^[a-z0-9][a-z0-9-]{1,31}$/.test(agentId)) throw new Error('unexpected answer from the proxy')
     if (valid.size > 1000) valid.clear()
-    valid.set(t, Date.now() + 30_000)
-    return true
+    valid.set(t, { exp: Date.now() + 30_000, agentId })
+    return agentId
   }
 
   // Mode sans session : un serveur MCP neuf par requête, lié à l'agent qui appelle
@@ -253,9 +326,13 @@ if ((process.env.MCP_TRANSPORT ?? 'stdio') === 'http') {
     const auth = req.get('Authorization') ?? ''
     if (!auth.startsWith('Bearer ') || auth.length < 12) return unauthorized(res, 'Sign in required: connect this assistant to AgentGetPay')
     const t = auth.slice(7)
-    try { if (!(await checkToken(t))) return unauthorized(res, 'Invalid or expired token: connect again', true) }
+    let agentId: string | undefined
+    try { agentId = await checkToken(t); if (!agentId) return unauthorized(res, 'Invalid or expired token: connect again', true) }
     catch { return res.status(503).json({ jsonrpc: '2.0', error: { code: -32002, message: 'AgentGetPay proxy unreachable' }, id: null }) }
-    const server = buildServer(t)
+    // Chaque agent a son propre dossier : un assistant ne voit jamais les fichiers d'un autre
+    const ws = join(WORKSPACE, agentId)
+    await mkdir(ws, { recursive: true })
+    const server = buildServer(t, { ws, agentId, links })
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,

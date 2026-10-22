@@ -1,0 +1,8 @@
+[
+  {
+    "name": "PDF Libre",
+    "description": "PDF tools for agents: compress a PDF, merge several PDFs. Paid per call in BSV.",
+    "discovery": "https://pdf-libre.de/agent/v1",
+    "example": "POST https://pdf-libre.de/agent/v1/compress with body {\"pdf\": {\"$file\": \"in/invoice.pdf\"}, \"filename\": \"invoice.pdf\"}"
+  }
+]
