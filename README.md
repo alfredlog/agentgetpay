@@ -145,7 +145,7 @@ Daily spending is rebuilt from the audit log when the proxy starts, so restartin
 
 ## Deploy on a server
 
-`deploy/` contains a pm2 configuration, a Caddy block and a step-by-step guide: [deploy/DEPLOY.md](deploy/DEPLOY.md). Behind Caddy, set `PROXY_PUBLIC=true` so the proxy knows it is public even though it listens on `127.0.0.1`. With `DASHBOARD_PUBLIC_READ=true`, anyone can view the dashboard (useful for a public demo) while exports, anchoring and the admin page keep requiring the admin password.
+`deploy/` contains a pm2 configuration, a Caddy block and a step-by-step guide: [deploy/DEPLOY.md](deploy/DEPLOY.md). Behind Caddy, set `PROXY_PUBLIC=true` so the proxy knows it is public even though it listens on `127.0.0.1`. In public mode the dashboard is private: only the administrator and the people they authorise can open it. The admin page creates read-only **access codes** (`agv_…`, shown once, stored hashed, revocable); they allow viewing the dashboard and downloading the exports, but not changing agents or anchoring. Every grant and revocation is recorded in the audit log. `DASHBOARD_PUBLIC_READ=true` makes the dashboard readable by anyone, for a public demo.
 
 ## Scripts
 
