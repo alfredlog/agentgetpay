@@ -21,7 +21,8 @@
     "agent:pdf": "tsx src/agent/pdf-agent.ts",
     "mcp": "tsx src/mcp/server.ts",
     "mcp:http": "MCP_TRANSPORT=http tsx src/mcp/server.ts",
-    "mcp:config": "tsx src/mcp/print-config.ts"
+    "mcp:config": "tsx src/mcp/print-config.ts",
+    "test:oauth": "tsx src/test/oauth-flow.ts"
   },
   "dependencies": {
     "@bsv/sdk": "^3.2.1",
