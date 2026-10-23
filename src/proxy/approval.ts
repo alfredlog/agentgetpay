@@ -1,23 +1,63 @@
-// Validation humaine. Le proxy ne connaît que l'interface ApprovalChannel.
-import { ApprovalChannel, PaymentRequest } from './types.js'
+// Validation humaine. Les demandes sont enregistrées (RequestStore) : un canal ne fait que PRÉVENIR un humain
+// et TRANSMETTRE sa décision. Une décision peut arriver des heures ou des jours plus tard, même après un redémarrage.
+import type { StoredRequest } from './requests.js'
 import { fmt } from './policy.js'
 
-type Result = Awaited<ReturnType<ApprovalChannel['requestApproval']>>
+export type DecisionHandler = (requestId: string, approved: boolean, by: string) => Promise<string> | string
 
-// --- Version Telegram : un message avec deux boutons sur ton téléphone ---
-export class TelegramApprovalChannel implements ApprovalChannel {
+export interface ApprovalNotifier {
+  readonly name: string
+  // Prévient un humain ; renvoie de quoi retrouver le message (pour le mettre à jour plus tard)
+  notify(r: StoredRequest): Promise<Record<string, unknown> | undefined>
+  // La demande est terminée (décidée ailleurs, exécutée, expirée) : on met le message à jour
+  closed(r: StoredRequest, outcome: string): Promise<void>
+  onDecision(handler: DecisionHandler): void
+}
+
+// Texte d'une demande, lisible sur un téléphone
+export function describeRequest(r: StoredRequest): string {
+  const until = new Date(r.expiresAt).toLocaleString('en-GB', { timeZone: 'Europe/Berlin', dateStyle: 'medium', timeStyle: 'short' })
+  if (r.kind === 'mandate' && r.mandate) {
+    return [
+      `🔁 Standing approval requested (${r.id})`,
+      `Agent: ${r.agentId}`,
+      `Merchant: ${r.mandate.domain}${r.mandate.category ? ` · ${r.mandate.category}` : ''}`,
+      `Up to ${fmt(r.mandate.maxEurPerMonth)} per month for ${r.mandate.months} month(s)`,
+      `Agent's purpose: ${r.purpose ?? '—'}`,
+      `Open until: ${until}`
+    ].join('\n')
+  }
+  let service = r.url ?? ''
+  try { const u = new URL(service); service = `${u.host}${u.pathname}` } catch {}
+  const o = r.order
+  return [
+    `🔔 Approval requested (${r.id})`,
+    `Agent: ${r.agentId}`,
+    `Amount: ${fmt(r.amountEur ?? 0)} (${r.amountSats} sats)`,
+    o ? `Merchant: ${o.merchant} · ${o.category}` : `Service: ${service}`,
+    ...(o ? [`Items: ${o.items.map(i => `${i.quantity}× ${i.name}`).join(', ')}`] : []),
+    ...(o?.shipTo ? [`Delivery: ${o.shipTo.street}, ${o.shipTo.postalCode} ${o.shipTo.city}`] : []),
+    `Agent's purpose: ${r.purpose ?? '—'}`,
+    `Rule: ${r.reason}`,
+    `Open until: ${until}`
+  ].join('\n')
+}
+
+// --- Telegram : un message avec deux boutons sur ton téléphone ---
+export class TelegramNotifier implements ApprovalNotifier {
+  readonly name = 'telegram'
   private api: string
-  private pending = new Map<string, (r: Result) => void>()
   private offset = 0
+  private handler?: DecisionHandler
 
-  constructor(token: string, private chatId: string, private timeoutMs = 120_000,
-              apiBase = process.env.TELEGRAM_API_BASE ?? 'https://api.telegram.org') {
+  constructor(token: string, private chatId: string, apiBase = process.env.TELEGRAM_API_BASE ?? 'https://api.telegram.org') {
     this.api = `${apiBase}/bot${token}`
     void this.checkToken()
     void this.poll()
   }
 
-  // Au démarrage : vérifie le token et affiche le nom du bot
+  onDecision(handler: DecisionHandler) { this.handler = handler }
+
   private async checkToken() {
     try {
       const r = (await (await fetch(`${this.api}/getMe`)).json()) as { ok: boolean; result?: { username: string } }
@@ -28,44 +68,19 @@ export class TelegramApprovalChannel implements ApprovalChannel {
     }
   }
 
-  async requestApproval(req: PaymentRequest, reason: string, signal?: AbortSignal): Promise<Result> {
-    const id = Math.random().toString(36).slice(2, 10)
-    const text = [
-      '🔔 Approval requested',
-      `Agent: ${req.agentId}`,
-      `Amount: ${fmt(req.amountEur)} (${req.amountSats} sats)`,
-      `Service: ${new URL(req.url).host}${new URL(req.url).pathname}`,
-      `Agent's purpose: ${req.purpose ?? '—'}`,
-      `Rule: ${reason}`
-    ].join('\n')
-
+  async notify(r: StoredRequest) {
+    const text = describeRequest(r)
     const sent = await this.call('sendMessage', {
       chat_id: this.chatId, text,
-      reply_markup: { inline_keyboard: [[
-        { text: '✅ Approve', callback_data: `ok:${id}` },
-        { text: '❌ Reject', callback_data: `no:${id}` }
-      ]] }
+      reply_markup: { inline_keyboard: [[{ text: '✅ Approve', callback_data: `ok:${r.id}` }, { text: '❌ Reject', callback_data: `no:${r.id}` }]] }
     })
-    // Si le message n'est pas parti, inutile de faire attendre l'agent 2 minutes
-    if (!sent) return { status: 'rejected', by: 'Telegram error (message not sent)' }
+    return sent?.message_id ? { telegram: { chatId: this.chatId, messageId: sent.message_id, text } } : undefined
+  }
 
-    return new Promise<Result>(resolve => {
-      const finish = (r: Result) => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); this.pending.delete(id); resolve(r) }
-      const timer = setTimeout(() => {
-        finish({ status: 'timeout' })
-        void this.call('editMessageText', { chat_id: this.chatId, message_id: sent.message_id, text: `${text}\n\n⌛ No answer: payment refused` })
-      }, this.timeoutMs)
-      // Décision prise sur le tableau de bord : on met le message à jour et on retire les boutons
-      const onAbort = () => {
-        if (!this.pending.has(id)) return
-        const r = (signal?.reason ?? {}) as Result
-        finish(r)
-        const outcome = r.status === 'approved' ? `✅ Approved by ${r.by}` : r.status === 'rejected' ? `❌ Rejected by ${r.by}` : '⌛ Closed'
-        void this.call('editMessageText', { chat_id: this.chatId, message_id: sent.message_id, text: `${text}\n\n${outcome}` })
-      }
-      this.pending.set(id, finish)
-      signal?.addEventListener('abort', onAbort)
-    })
+  async closed(r: StoredRequest, outcome: string) {
+    const t = r.notices?.telegram as { chatId: string; messageId: number; text: string } | undefined
+    if (!t) return
+    await this.call('editMessageText', { chat_id: t.chatId, message_id: t.messageId, text: `${t.text}\n\n${outcome}` })
   }
 
   // Écoute les clics sur les boutons (long polling : pas besoin de serveur public)
@@ -79,17 +94,9 @@ export class TelegramApprovalChannel implements ApprovalChannel {
           const cq = u.callback_query
           if (!cq?.data) continue
           const [action, id] = String(cq.data).split(':')
-          const done = this.pending.get(id)
           const who = cq.from?.username ? `@${cq.from.username}` : cq.from?.first_name ?? 'unknown'
-          await this.call('answerCallbackQuery', { callback_query_id: cq.id })
-          if (!done) continue
-          this.pending.delete(id)
-          const approved = action === 'ok'
-          await this.call('editMessageText', {
-            chat_id: cq.message.chat.id, message_id: cq.message.message_id,
-            text: `${cq.message.text}\n\n${approved ? '✅ Approved' : '❌ Rejected'} by ${who}`
-          })
-          done({ status: approved ? 'approved' : 'rejected', by: who })
+          const answer = this.handler ? await this.handler(id, action === 'ok', who) : 'Not ready'
+          await this.call('answerCallbackQuery', { callback_query_id: cq.id, text: answer })
         }
       } catch (e) {
         console.error('Telegram unreachable, retrying in 5 s:', (e as Error).message)
@@ -113,22 +120,24 @@ export class TelegramApprovalChannel implements ApprovalChannel {
   }
 }
 
-// --- Sans Telegram : on attend une décision sur le tableau de bord ---
-export class DashboardOnlyApprovalChannel implements ApprovalChannel {
-  constructor(private timeoutMs = 120_000) {}
-  requestApproval(_req: PaymentRequest, _reason: string, signal?: AbortSignal): Promise<Result> {
-    return new Promise(resolve => {
-      const timer = setTimeout(() => resolve({ status: 'timeout' }), this.timeoutMs)
-      signal?.addEventListener('abort', () => { clearTimeout(timer); resolve((signal.reason ?? { status: 'timeout' }) as Result) })
-    })
-  }
+// --- Sans Telegram : on décide sur le tableau de bord, rien à envoyer ---
+export class DashboardOnlyNotifier implements ApprovalNotifier {
+  readonly name = 'dashboard'
+  async notify() { return undefined }
+  async closed() {}
+  onDecision() {}
 }
 
-// --- Version automatique, pour les tests sans téléphone ---
-export class AutoApprovalChannel implements ApprovalChannel {
-  constructor(private answer: 'approved' | 'rejected') {}
-  async requestApproval(req: PaymentRequest, reason: string): Promise<Result> {
-    console.log(`(test) Auto-approval "${this.answer}" for ${fmt(req.amountEur)} — ${reason}`)
-    return { status: this.answer, by: 'test-auto' }
+// --- Réponse automatique, pour les tests sans téléphone ---
+export class AutoNotifier implements ApprovalNotifier {
+  readonly name = 'auto'
+  private handler?: DecisionHandler
+  constructor(private answer: 'approved' | 'rejected', private delayMs = 0) {}
+  onDecision(handler: DecisionHandler) { this.handler = handler }
+  async notify(r: StoredRequest) {
+    console.log(`(test) Auto-answer "${this.answer}" for ${r.id} — ${r.reason}`)
+    setTimeout(() => void this.handler?.(r.id, this.answer === 'approved', 'test-auto'), this.delayMs)
+    return undefined
   }
+  async closed() {}
 }

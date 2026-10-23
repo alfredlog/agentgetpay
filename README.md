@@ -51,7 +51,7 @@ Send testnet coins to the address it prints (for example from [scrypt.io/faucet]
 npm run balance
 ```
 
-Optional, for phone approvals: create a bot with @BotFather on Telegram, add `TELEGRAM_BOT_TOKEN=...` to `.env`, send "hello" to your bot, then run `npm run telegram:setup`. Approvals can always be given on the dashboard too (✅ Approve / ❌ Reject on the waiting request; on a public server, only the administrator sees these buttons). Without Telegram, the dashboard is the only way to approve; a request with no answer after 2 minutes is refused. `APPROVAL_AUTO=approved|rejected` answers automatically, for tests.
+Optional, for phone approvals: create a bot with @BotFather on Telegram, add `TELEGRAM_BOT_TOKEN=...` to `.env`, send "hello" to your bot, then run `npm run telegram:setup`. Approvals can always be given on the dashboard too (✅ Approve / ❌ Reject on the waiting request; on a public server, only the administrator sees these buttons). Without Telegram, the dashboard is the only way to approve. A request stays open for 3 days (`APPROVAL_TTL_HOURS`, default 72), then expires. `APPROVAL_AUTO=approved|rejected` answers automatically, for tests.
 
 **Never commit or share `.env`**: it holds the wallet key.
 
@@ -109,7 +109,7 @@ Under the hood: OAuth 2.1 with discovery (RFC 9728, RFC 8414), dynamic client re
 
 **Files:** the assistant only sees the `workspace/` folder. In a request body, `{"$file": "invoice.pdf"}` is replaced by the file's content; files received (for example a compressed PDF) are saved in `workspace/out/`. Paths outside the folder and symbolic links pointing outside are refused.
 
-Payments above the approval threshold wait up to 2 minutes for the human; some assistants stop waiting for a tool earlier.
+When a payment needs approval, the assistant waits 20 seconds at most; then it gets a request id and continues with other work. It calls `check_request` later to get the result.
 
 ### Prove the audit log on the blockchain
 
@@ -138,6 +138,16 @@ Merchants can describe what they sell in the 402 offer (`extensions.order`: merc
 - The order (merchant, category, items) is stored in the audit log and shown on the dashboard.
 
 Everything is set on the admin page under **Purchase rules**. A **demo market** (`npm run market`) runs fictional shops agents can buy from (hotels in Munich, office supplies with delivery, software subscriptions), with free catalogs at `/api`, paid orders, and a storefront that lists the latest orders paid by agents. It is built with the **seller kit** (`src/shared/seller-kit.ts`): any Express API can charge agents in a few lines. Test: `npm run test:market`. The demo seller (`npm run seller`) includes three fictional shops that describe their orders: a hotel (`/api/hotel/book`), office supplies (`/api/office/order`) and a software subscription (`/api/software/subscribe`). Test: `npm run test:purchase`.
+
+### Long approvals, refunds and mandates
+
+**Approvals can take hours or days.** When a purchase needs a human, the agent waits a few seconds at most (`waitSeconds` on `/v1/fetch`, 0–120, default 120). If nobody has answered yet, it receives `202 pending_approval` with a request id (`R-…`) and continues its work. The request is stored and survives restarts. When someone approves it (Telegram or dashboard, even days later), the proxy **makes the purchase by itself**, never paying more than the approved amount and re-checking budgets and rules, then keeps the result for the agent: `GET /v1/requests/:id` and `GET /v1/requests/:id/result`. An agent can give a `callbackUrl` (on one of its allowed domains) to be notified. Requests with no answer expire after `APPROVAL_TTL_HOURS` (default 72). Assistants use the MCP tools `check_request` and `list_requests`.
+
+**Refunds.** A merchant can cancel and pay back in BSV: the seller kit's `refund()` returns the money to the address the buyer gave (`refundTo`, sent automatically by the proxy) and puts the transaction in a `PAYMENT-REFUND` header. The proxy checks that it pays the company wallet, that it refers to one of its payments and does not exceed it, broadcasts it, records a `refund` entry in the audit log, gives the budget back, and books it as a credit (H) in the DATEV export. The demo market supports cancellations (`POST /api/cancel`): hotels until the day before check-in, office supplies within one hour.
+
+**Mandates (standing approvals).** For recurring purchases, an agent asks once (`POST /v1/mandates`, MCP tool `request_mandate`): one merchant, optionally one category, a maximum per month, a duration. Once a human approves, matching payments no longer wait for approval; budgets, categories and other rules still apply, and anything beyond the monthly maximum needs approval again. Mandates are listed on the admin page and can be revoked at any time.
+
+Test: `npm run test:approval` (requests that survive a restart, background execution, callback, rejection, expiry, refund and DATEV credit, mandate).
 
 ### Accounting export (DATEV)
 
@@ -187,6 +197,7 @@ Daily spending is rebuilt from the audit log when the proxy starts, so restartin
 | `npm run test:files` | Test upload and download links for remote assistants, offline |
 | `npm run market` | Demo market: fictional shops paid by agents (port 5080) |
 | `npm run test:market` | Test the demo market through the proxy, offline |
+| `npm run test:approval` | Test long approvals, refunds and mandates, offline |
 | `npm run test:purchase` | Test the purchase policy (budgets, categories, delivery addresses), offline |
 | `npm run test:local`, `npm run test:proxy` | Offline tests with a fake wallet |
 

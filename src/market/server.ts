@@ -11,7 +11,7 @@ import 'dotenv/config'
 import express, { Request } from 'express'
 import { randomBytes } from 'node:crypto'
 import { appendFileSync, existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs'
-import { createSeller } from '../shared/seller-kit.js'
+import { createSeller, type PaidInvoice } from '../shared/seller-kit.js'
 import type { OrderInfo } from '../shared/x402.js'
 
 const PORT = Number(process.env.MARKET_PORT ?? 5080)
@@ -53,7 +53,13 @@ const eur = (sats: number) => `€${(sats * EUR_PER_SAT).toFixed(2)}`
 // ---------------------------------------------------------------------------
 // Commandes payées (pour la vitrine et les confirmations)
 // ---------------------------------------------------------------------------
-interface Sale { id: string; ts: string; merchant: string; category: string; summary: string; sats: number; txid: string }
+interface Sale {
+  id: string; ts: string; merchant: string; category: string; summary: string; sats: number; txid: string
+  checkIn?: string                 // hôtel : date d'arrivée (pour les conditions d'annulation)
+  paid?: PaidInvoice               // de quoi rembourser
+  status?: 'paid' | 'cancelled'
+  refundTxid?: string; refundSats?: number
+}
 const SALES_FILE = 'data/market-sales.json'
 const sales: Sale[] = existsSync(SALES_FILE) ? JSON.parse(readFileSync(SALES_FILE, 'utf8')) : []
 const saveSales = () => {
@@ -71,7 +77,9 @@ const seller = createSeller({
     const id = `${(order?.category ?? 'X').split('.')[0].slice(0, 2).toUpperCase()}-${randomBytes(3).toString('hex').toUpperCase()}`
     sales.push({
       id, ts: new Date().toISOString(), merchant: order?.merchant ?? 'Market', category: order?.category ?? '',
-      summary: order ? order.items.map(i => `${i.quantity}× ${i.name}`).join(', ') : inv.resource, sats: inv.amount, txid
+      summary: order ? order.items.map(i => `${i.quantity}× ${i.name}`).join(', ') : inv.resource, sats: inv.amount, txid,
+      checkIn: order?.category === 'travel.hotel' ? String(req.body?.checkIn ?? '') : undefined,
+      paid: seller.paidRecord(inv), status: 'paid'
     })
     saveSales()
     req.res!.locals.saleId = id
@@ -150,9 +158,11 @@ app.get('/api', (req, res) => {
       {
         name: MERCHANTS.software, category: 'software.subscription',
         plans: `GET ${b}/api/software/plans (free)`,
-        subscribe: `POST ${b}/api/software/subscribe`, body: { plan: 'notes', seats: 3 }
+        subscribe: `POST ${b}/api/software/subscribe`, body: { plan: 'notes', seats: 3 },
+        note: 'Monthly subscription: ask your company for a standing approval (mandate) so renewals do not wait for a human.'
       }
-    ]
+    ],
+    cancel: { request: `POST ${b}/api/cancel`, body: { order: 'TR-XXXXXX' }, rules: 'Hotels: free until the day before check-in. Office supplies: within 1 hour. Subscriptions: not refunded. The refund is paid back in BSV to the buyer.' }
   })
 })
 
@@ -171,13 +181,39 @@ app.get('/api/software/plans', (_req, res) => res.json(Object.entries(PLANS).map
 
 app.post('/api/hotels/book', seller.requirePayment(req => hotelQuote(req.body), 'Hotel booking'), (req, res) => {
   const q = hotelQuote(req.body) as { order: OrderInfo }
-  res.json({ confirmation: res.locals.saleId ?? 'already confirmed', hotel: q.order.merchant, guest: req.body.guest, checkIn: req.body.checkIn, nights: req.body.nights ?? 1, txid: res.locals.payment?.txid })
+  res.json({
+    confirmation: res.locals.saleId ?? 'already confirmed', hotel: q.order.merchant, guest: req.body.guest, checkIn: req.body.checkIn, nights: req.body.nights ?? 1, txid: res.locals.payment?.txid,
+    cancellation: `Free cancellation until the day before check-in: POST ${base(req)}/api/cancel with {"order": "${res.locals.saleId ?? '…'}"}`
+  })
 })
-app.post('/api/office/orders', seller.requirePayment(req => officeQuote(req.body), 'Office supplies order'), (_req, res) => {
-  res.json({ order: res.locals.saleId ?? 'already confirmed', delivery: '2–3 business days', txid: res.locals.payment?.txid })
+app.post('/api/office/orders', seller.requirePayment(req => officeQuote(req.body), 'Office supplies order'), (req, res) => {
+  res.json({
+    order: res.locals.saleId ?? 'already confirmed', delivery: '2–3 business days', txid: res.locals.payment?.txid,
+    cancellation: `Can be cancelled within 1 hour: POST ${base(req)}/api/cancel with {"order": "${res.locals.saleId ?? '…'}"}`
+  })
 })
 app.post('/api/software/subscribe', seller.requirePayment(req => softwareQuote(req.body), 'Software subscription (1 month)'), (req, res) => {
   res.json({ subscription: res.locals.saleId ?? 'already confirmed', plan: req.body.plan, seats: req.body.seats ?? 1, period: '1 month', txid: res.locals.payment?.txid })
+})
+
+// Annulation, avec remboursement en BSV (en-tête PAYMENT-REFUND : le proxy de l'acheteur le vérifie et l'enregistre)
+//   hôtel : gratuite jusqu'à la veille de l'arrivée · fournitures : dans l'heure · abonnement : pas de remboursement
+app.post('/api/cancel', async (req, res) => {
+  const sale = sales.find(x => x.id === String(req.body?.order ?? '').trim().toUpperCase())
+  if (!sale) return res.status(404).json({ error: 'Unknown order' })
+  if (sale.status === 'cancelled') return res.status(409).json({ error: 'This order is already cancelled', refundTxid: sale.refundTxid })
+  if (sale.category === 'travel.hotel' && !(sale.checkIn && sale.checkIn > today())) return res.status(409).json({ error: 'Too late: free cancellation ends the day before check-in' })
+  if (sale.category === 'office.supplies' && Date.now() - Date.parse(sale.ts) > 3600_000) return res.status(409).json({ error: 'Too late: the order has been shipped (cancellation within 1 hour only)' })
+  if (sale.category.startsWith('software')) return res.status(409).json({ error: 'Subscriptions are not refunded; they simply end after the paid month' })
+  if (!sale.paid) return res.status(409).json({ error: 'This order cannot be refunded automatically' })
+  try {
+    const notice = await seller.refund(sale.paid)
+    Object.assign(sale, { status: 'cancelled', refundTxid: notice.refundTxid, refundSats: notice.sats })
+    saveSales()
+    res.set('PAYMENT-REFUND', seller.refundHeader(notice)).json({ cancelled: sale.id, refundSats: notice.sats, refundEur: +(notice.sats * EUR_PER_SAT).toFixed(2), refundTxid: notice.refundTxid })
+  } catch (e) {
+    res.status(500).json({ error: `Refund failed: ${(e as Error).message}` })
+  }
 })
 
 // ---------------------------------------------------------------------------
@@ -217,7 +253,7 @@ ${card(MERCHANTS.software, 'software.subscription', Object.values(PLANS).map(p =
 </div>
 <h2>Latest orders paid by agents</h2>
 <section class="card wrap"><table><thead><tr><th>Time</th><th>Order</th><th>Shop</th><th>What</th><th class="num">Amount</th><th>Payment on BSV</th></tr></thead><tbody>
-${recent.map(s => `<tr><td class="muted">${new Date(s.ts).toLocaleString('en-GB', { timeZone: 'Europe/Berlin', dateStyle: 'short', timeStyle: 'short' })}</td><td>${esc(s.id)}</td><td>${esc(s.merchant)}</td><td class="muted">${esc(s.summary)}</td><td class="num">${eur(s.sats)}</td><td><a href="https://test.whatsonchain.com/tx/${esc(s.txid)}" rel="noopener" target="_blank">${esc(s.txid.slice(0, 10))}…</a></td></tr>`).join('') || '<tr><td colspan="6" class="muted">No order yet.</td></tr>'}
+${recent.map(s => `<tr><td class="muted">${new Date(s.ts).toLocaleString('en-GB', { timeZone: 'Europe/Berlin', dateStyle: 'short', timeStyle: 'short' })}</td><td>${esc(s.id)}</td><td>${esc(s.merchant)}</td><td class="muted">${esc(s.summary)}</td><td class="num">${eur(s.sats)}</td><td><a href="https://test.whatsonchain.com/tx/${esc(s.txid)}" rel="noopener" target="_blank">${esc(s.txid.slice(0, 10))}…</a>${s.status === 'cancelled' && s.refundTxid ? `<br><span class="muted">Cancelled · refund </span><a href="https://test.whatsonchain.com/tx/${esc(s.refundTxid)}" rel="noopener" target="_blank">${esc(s.refundTxid.slice(0, 10))}…</a>` : ''}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">No order yet.</td></tr>'}
 </tbody></table></section>
 </main></body></html>`)
 })
