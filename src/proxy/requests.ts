@@ -23,9 +23,19 @@ export interface MandateTerms {
   months: number            // duration
 }
 
+// A virtual card asked for by an agent (card rail): one merchant, one amount
+export interface CardTerms {
+  merchantName: string
+  merchantDomain: string
+  category?: string
+  amountEur: number      // expected price
+  limitEur: number       // card limit = price + tolerance (a hotel may hold a bit more)
+  validDays: number
+}
+
 export interface StoredRequest {
   id: string                 // e.g. "R-7K2Q9D"
-  kind: 'payment' | 'mandate'
+  kind: 'payment' | 'mandate' | 'card'
   agentId: string
   purpose?: string
   reason: string             // why an approval is needed
@@ -43,8 +53,10 @@ export interface StoredRequest {
   callbackUrl?: string       // the agent is notified here when the request is finished
   // Mandate
   mandate?: MandateTerms
+  // Virtual card
+  card?: CardTerms
   // Result
-  result?: { status: number; contentType: string; paidSats?: number; txid?: string; mandateId?: string; error?: string }
+  result?: { status: number; contentType: string; paidSats?: number; txid?: string; mandateId?: string; cardId?: string; error?: string }
   // Approval messages sent (to update them later: Telegram…)
   notices?: Record<string, unknown>
 }
@@ -110,4 +122,5 @@ export class RequestStore {
     return existsSync(p) ? readFileSync(p) : undefined
   }
   dropBody(id: string) { rmSync(join(this.dir, `${id}.body`), { force: true }) }
+  dropResult(id: string) { rmSync(join(this.dir, `${id}.result`), { force: true }) }
 }

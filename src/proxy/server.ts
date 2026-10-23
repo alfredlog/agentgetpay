@@ -2,7 +2,7 @@
 // For each 402: rules → budget reservation → signature → payment → audit log.
 import 'dotenv/config'
 import express from 'express'
-import { appendFileSync } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { WhatsOnChainUtxoProvider, UtxoProvider, ChainedUtxoProvider } from '../shared/utxo.js'
 import { JsonPolicyEngine, fmt, formatAddress } from './policy.js'
@@ -13,6 +13,8 @@ import { TelegramNotifier, AutoNotifier, DashboardOnlyNotifier, type ApprovalNot
 import { RequestStore, type StoredRequest } from './requests.js'
 import { MandateStore } from './mandates.js'
 import { createPurchaseEngine } from './purchase.js'
+import { createCardRail, MCC_CATEGORIES } from '../card/rail.js'
+import { SimulatedIssuer, NotConfiguredIssuer } from '../card/issuer.js'
 import { AnchorLog, BsvAnchorRail, verifyAgainstChain, cachedWocFetch, FetchTxHex, Anchor } from './anchor.js'
 import { Mutex } from '../shared/mutex.js'
 import { DatevExporter, loadAccountingConfig, monthlyStatementHtml } from './accounting.js'
@@ -68,6 +70,24 @@ const notifier: ApprovalNotifier = process.env.APPROVAL_AUTO
 const APPROVAL_TTL_HOURS = Number(process.env.APPROVAL_TTL_HOURS ?? 72)
 const requests = new RequestStore()
 const mandates = new MandateStore()
+
+// Card rail (virtual cards for merchants that do not accept BSV). CARD_ISSUER=simulated (default) or off.
+let recordEntry: (e: Parameters<typeof ledger.record>[0]) => Promise<unknown> = e => ledger.record(e)
+const CARD_ISSUER = (process.env.CARD_ISSUER ?? 'simulated').trim().toLowerCase()
+// Key of the simulated card network: only merchants that know it can submit card charges (demo market)
+let CARD_NETWORK_KEY = process.env.CARD_NETWORK_KEY ?? ''
+if (CARD_ISSUER === 'simulated' && CARD_NETWORK_KEY.length < 16) {
+  CARD_NETWORK_KEY = randomBytes(24).toString('base64url')
+  appendFileSync('.env', `\nCARD_NETWORK_KEY=${CARD_NETWORK_KEY}\n`)
+  console.log('Card network key created and saved in .env')
+}
+const cards = CARD_ISSUER === 'off' ? undefined : createCardRail({
+  issuer: CARD_ISSUER === 'simulated' ? new SimulatedIssuer() : new NotConfiguredIssuer(),
+  eurPerSat: EUR_PER_SAT, budget, policy,
+  record: e => recordEntry(e), // goes through createProxy's record() once it exists (so card entries get anchored too)
+  isActive: id => registry.isActive(id)
+})
+cards?.restoreHolds() // open cards keep holding their limit after a restart
 
 // Admin password (constant-time comparison)
 const isAdmin = (req: express.Request) => {
@@ -135,6 +155,7 @@ export function createProxy(
     }
   }
   const record = async (e: Parameters<typeof ledger.record>[0]) => { await ledger.record(e); void maybeAnchor() }
+  recordEntry = record
 
   const app = express()
   app.set('trust proxy', 'loopback') // behind Caddy: the visitor's real IP address (sign-in attempt limit)
@@ -154,6 +175,19 @@ export function createProxy(
   app.use(oauth.router())
   app.use(express.static('public')) // the dashboard: http://localhost:5050
 
+  // Merchants known to accept BSV: listed as such in the service catalog, or already paid in BSV by the company
+  const bsvMerchants = () => {
+    const set = new Set<string>()
+    try {
+      const path = process.env.MCP_SERVICES ?? 'config/services.json'
+      if (existsSync(path)) for (const s of JSON.parse(readFileSync(path, 'utf8'))) {
+        if (!Array.isArray(s.accepts) || s.accepts.includes('bsv')) set.add(new URL(s.discovery).hostname)
+      }
+    } catch { /* an unreadable catalog only disables this shortcut */ }
+    for (const e of ledger.allSync()) if (e.decision === 'allow' && e.txid && e.rail !== 'card') { try { set.add(new URL(e.url).hostname) } catch {} }
+    return set
+  }
+
   // The purchase engine: rules, mandates, approvals (even long ones), payment, refunds
   const engine = createPurchaseEngine({
     eurPerSat: EUR_PER_SAT, policy, budget, keys, utxos, walletLock, ledger, record, requests, mandates,
@@ -162,7 +196,9 @@ export function createProxy(
     checkTarget: (url, agentId) => checkTarget(url, registry.rulesFor(agentId)?.allowed_domains),
     broadcaster: opts.broadcaster,
     approvalTtlHours: APPROVAL_TTL_HOURS,
-    publicBase: ISSUER
+    publicBase: ISSUER,
+    cards,
+    acceptsBsv: domain => bsvMerchants().has(domain)
   })
   void engine.resume()
   const sweeper = setInterval(() => void engine.sweep(), Number(process.env.APPROVAL_SWEEP_MS ?? 30_000))
@@ -172,7 +208,7 @@ export function createProxy(
   const requestView = (r: StoredRequest) => ({
     id: r.id, kind: r.kind, agentId: r.agentId, status: r.status, reason: r.reason, purpose: r.purpose,
     createdAt: r.createdAt, expiresAt: r.expiresAt, decidedBy: r.decidedBy, decidedAt: r.decidedAt,
-    url: r.url, amountEur: r.amountEur, amountSats: r.amountSats, order: r.order, mandate: r.mandate,
+    url: r.url, amountEur: r.amountEur, amountSats: r.amountSats, order: r.order, mandate: r.mandate, card: r.card,
     result: r.result ? { status: r.result.status, paidSats: r.result.paidSats, txid: r.result.txid, mandateId: r.result.mandateId, error: r.result.error } : undefined
   })
 
@@ -298,7 +334,8 @@ export function createProxy(
     const r = requests.get(req.params.id)
     if (!r || r.agentId !== agent.id) return res.status(404).json({ error: 'Unknown request' })
     const body = requests.result(r.id)
-    if (!r.result || !body) return res.status(409).json({ error: `No result yet: the request is ${r.status}` })
+    if (!r.result || !body) return res.status(409).json({ error: r.kind === 'card' && r.status === 'completed' ? 'The card details were already fetched (they can only be fetched once)' : `No result yet: the request is ${r.status}` })
+    if (r.kind === 'card') requests.dropResult(r.id) // card details: one time only
     res.status(r.result.status).set('X-Paid-Sats', String(r.result.paidSats ?? 0)).type(r.result.contentType).send(body)
   })
 
@@ -326,6 +363,64 @@ export function createProxy(
     if (!agent) return
     const used = engine.usedByMandate(ledger.allSync())
     res.json(mandates.active(agent.id).map(m => ({ ...m, usedThisMonthEur: used(m.id) })))
+  })
+
+  // ---- Card rail: virtual cards for merchants that do not accept BSV ----
+  app.post('/v1/cards', async (req, res) => {
+    const agent = authAgent(req, res)
+    if (!agent) return
+    if (!cards) return res.status(404).json({ error: 'The card rail is not enabled' })
+    const b = req.body ?? {}
+    const rules = registry.rulesFor(agent.id)
+    const domain = String(b.merchantDomain ?? '').trim().toLowerCase()
+    const name = String(b.merchantName ?? '').trim().slice(0, 80)
+    const amount = Math.round(Number(b.amountEur) * 100) / 100
+    const tolerance = Number(b.tolerancePercent ?? 0), validDays = Number(b.validDays ?? 1)
+    if (!registry.isActive(agent.id)) return res.status(403).json({ decision: 'deny', reason: 'Agent suspended by an administrator' })
+    if (!rules?.allowed_domains.includes(domain)) return res.status(403).json({ decision: 'deny', reason: `Merchant domain not allowed: ${domain || '(missing)'}` })
+    if (name.length < 2) return res.status(400).json({ error: 'merchantName is required' })
+    if (!(amount > 0)) return res.status(400).json({ error: 'amountEur must be a positive number' })
+    if (!(tolerance >= 0 && tolerance <= 20)) return res.status(400).json({ error: 'tolerancePercent must be between 0 and 20' })
+    if (!Number.isInteger(validDays) || validDays < 1 || validDays > 60) return res.status(400).json({ error: 'validDays must be between 1 and 60' })
+    const category = b.category ? String(b.category).trim().toLowerCase() : undefined
+    if (category && !/^[a-z0-9]+(\.[a-z0-9]+)*$/.test(category)) return res.status(400).json({ error: 'Invalid category' })
+    let items: { name: string; quantity: number; unitPriceEur: number; unit?: string }[] | undefined
+    if (Array.isArray(b.items) && b.items.length) {
+      items = b.items.slice(0, 50).map((i: any) => ({ name: String(i?.name ?? '').slice(0, 120), quantity: Number(i?.quantity ?? 1), unitPriceEur: Number(i?.unitPriceEur), ...(i?.unit ? { unit: String(i.unit).slice(0, 20) } : {}) }))
+      if (items!.some(i => !i.name || !Number.isInteger(i.quantity) || i.quantity < 1 || !(i.unitPriceEur >= 0))) return res.status(400).json({ error: 'Each item needs name, quantity and unitPriceEur' })
+      const total = Math.round(items!.reduce((s, i) => s + i.quantity * i.unitPriceEur, 0) * 100) / 100
+      if (Math.abs(total - amount) > 0.005) return res.status(400).json({ error: `The items add up to ${fmt(total)}, not ${fmt(amount)}` })
+    }
+    if (b.callbackUrl !== undefined && checkTarget(b.callbackUrl, rules.allowed_domains)) return res.status(400).json({ error: 'callbackUrl must be on one of your allowed domains' })
+    const waitSeconds = Math.min(120, Math.max(0, Number(b.waitSeconds ?? 120) || 0))
+    const terms = { merchantName: name, merchantDomain: domain, category, amountEur: amount, limitEur: Math.round(amount * (1 + tolerance / 100) * 100) / 100, validDays }
+    const out = await engine.requestCard(agent.id, terms, items, b.purpose ? String(b.purpose).slice(0, 200) : undefined, b.callbackUrl, waitSeconds * 1000)
+    if (out.kind === 'issued') return res.json({ decision: 'allow', card: out.card })
+    if (out.kind === 'refused') return res.status(403).json({ decision: 'deny', reason: out.reason })
+    res.status(202).json({ decision: 'pending_approval', requestId: out.request.id, reason: out.request.reason, expiresAt: out.request.expiresAt,
+      message: `A human must approve this card. Request ${out.request.id} stays open until ${out.request.expiresAt}. Continue with other work; the card details can be fetched once with GET /v1/requests/${out.request.id}/result after approval.` })
+  })
+  app.get('/v1/cards', (req, res) => {
+    const agent = authAgent(req, res)
+    if (!agent) return
+    res.json((cards?.list() ?? []).filter(c => c.agentId === agent.id).reverse().slice(0, 50))
+  })
+
+  // Simulated card network: a merchant submits a card charge, AgentGetPay (as the issuer) decides in real time.
+  // With a real issuing platform, this is replaced by the platform's authorization webhook.
+  app.post('/v1/card-network/authorize', async (req, res) => {
+    if (!cards || CARD_ISSUER !== 'simulated') return res.status(404).json({ error: 'No simulated card network here' })
+    const given = Buffer.from(String(req.get('X-Network-Key') ?? '')), expected = Buffer.from(CARD_NETWORK_KEY)
+    if (given.length !== expected.length || !timingSafeEqual(given, expected)) return res.status(401).json({ error: 'Unknown merchant acquirer' })
+    const b = req.body ?? {}
+    const amountCents = Number(b.amountCents)
+    if (!Number.isInteger(amountCents) || amountCents <= 0) return res.status(400).json({ error: 'amountCents must be a positive integer' })
+    const result = await cards.networkAuthorize({
+      number: String(b.number ?? ''), cvc: String(b.cvc ?? ''), expMonth: Number(b.expMonth), expYear: Number(b.expYear),
+      amountCents, currency: String(b.currency ?? 'EUR').toUpperCase(), merchantName: String(b.merchantName ?? '').slice(0, 80),
+      merchantDomain: String(b.merchantDomain ?? '').toLowerCase().slice(0, 120), mcc: b.mcc ? String(b.mcc).slice(0, 4) : undefined
+    })
+    res.json(result)
   })
 
   // Dashboard data: protected by the admin password if the proxy is open to the network
@@ -360,6 +455,7 @@ export function createProxy(
         spentMonthEur: (await budget.spentThisMonth(a.id)) * EUR_PER_SAT,
         monthlyBudgetEur: r?.monthly_budget_eur,
         categories: r?.categories ? Object.keys(r.categories) : [],
+        paymentMethods: r?.payment_methods?.length ? r.payment_methods : ['bsv'],
         maxPerPaymentEur: r?.max_per_payment_eur ?? 0,
         approvalAboveEur: r?.approval_above_eur ?? 0,
         allowedDomains: r?.allowed_domains ?? []
@@ -401,6 +497,10 @@ export function createProxy(
         v.monthly_budget_eur !== undefined ? `${fmt(v.monthly_budget_eur)}/month` : '',
         v.approval_above_eur !== undefined ? `approval above ${fmt(v.approval_above_eur)}` : ''].filter(Boolean).join(' ')).join('; ')}` : 'Purchase categories removed (all categories allowed)')
     }
+    const methods = (r: typeof before) => (r.payment_methods?.length ? r.payment_methods : ['bsv']).join(' + ')
+    if (methods(before) !== methods(after)) parts.push(`Payment methods: ${methods(after)}`)
+    if ((before.card_categories ?? []).join(',') !== (after.card_categories ?? []).join(',')) parts.push(`Cards only for: ${(after.card_categories ?? []).join(', ') || 'any category'}`)
+    if ((before.card_only_if_no_bsv !== false) !== (after.card_only_if_no_bsv !== false)) parts.push(`BSV first ${after.card_only_if_no_bsv === false ? 'off' : 'on'}`)
     const addrText = (r: typeof before) => JSON.stringify(r.shipping_addresses ?? [])
     if (addrText(before) !== addrText(after)) parts.push(`Delivery addresses: ${(after.shipping_addresses ?? []).map(formatAddress).join(' | ') || 'none'}`)
     return parts.join(' · ')
@@ -475,6 +575,14 @@ export function createProxy(
     const approved = req.body?.approve === true
     const message = await engine.decide(r.id, approved, `${who(req)} (dashboard)`)
     res.json({ ok: true, message })
+  })
+
+  // Virtual cards (administration): list and cancel
+  admin.get('/cards', (_req, res) => res.json((cards?.list() ?? []).reverse()))
+  admin.delete('/cards/:id', async (req, res) => {
+    const c = await cards?.cancel(req.params.id, who(req))
+    if (!c) return res.status(404).json({ error: 'Unknown card, or not active any more' })
+    res.json({ ok: true })
   })
 
   // Current mandates (administration): list and revoke

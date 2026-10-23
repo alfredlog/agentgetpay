@@ -27,6 +27,19 @@ export function describeRequest(r: StoredRequest): string {
       `Open until: ${until}`
     ].join('\n')
   }
+  if (r.kind === 'card' && r.card) {
+    const c = r.card
+    return [
+      `💳 Virtual card requested (${r.id})`,
+      `Agent: ${r.agentId}`,
+      `Merchant: ${c.merchantName} (${c.merchantDomain})${c.category ? ` · ${c.category}` : ''}`,
+      `Amount: ${fmt(c.amountEur)} · card limit ${fmt(c.limitEur)} · single use · valid ${c.validDays} day(s)`,
+      ...(r.order ? [`Items: ${r.order.items.map(i => `${i.quantity}× ${i.name}`).join(', ')}`] : []),
+      `Agent's purpose: ${r.purpose ?? '—'}`,
+      `Rule: ${r.reason}`,
+      `Open until: ${until}`
+    ].join('\n')
+  }
   let service = r.url ?? ''
   try { const u = new URL(service); service = `${u.host}${u.pathname}` } catch {}
   const o = r.order

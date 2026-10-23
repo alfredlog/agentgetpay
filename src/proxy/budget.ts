@@ -69,6 +69,13 @@ export class MemoryBudgetStore implements BudgetStore {
     if (category) this.addCategory(agentId, category, -sats)
   }
 
+  // Holds an amount without checking limits (a virtual card that is still open, after a restart)
+  hold(agentId: string, sats: number, category?: string) {
+    this.add(this.dayKey(agentId), sats)
+    this.add(this.monthKey(agentId), sats)
+    if (category) this.addCategory(agentId, category, sats)
+  }
+
   async release(agentId: string, sats: number, category?: string) {
     this.add(this.dayKey(agentId), -sats)
     this.add(this.monthKey(agentId), -sats)

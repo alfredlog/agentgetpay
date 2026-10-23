@@ -149,6 +149,22 @@ Everything is set on the admin page under **Purchase rules**. A **demo market** 
 
 Test: `npm run test:approval` (requests that survive a restart, background execution, callback, rejection, expiry, refund and DATEV credit, mandate).
 
+### Card rail (simulated): merchants that do not accept BSV
+
+Hotels, airlines and most shops are paid by card. The card rail puts them under the **same rules, approvals and audit log** as BSV payments, without ever giving an agent the company's real card:
+
+1. The agent asks for a **single-use virtual card** (`POST /v1/cards`, MCP tool `request_virtual_card`): merchant, domain, category, amount, items, purpose, optional tolerance (up to 20 %, e.g. a hotel that holds a bit more) and validity (up to 60 days).
+2. The purchase policy applies (domains, categories, price per unit, budgets, max per payment on the card limit). Above the approval threshold, a human approves on Telegram or the dashboard, even days later. The card details can then be fetched **once**.
+3. The card limit is **held on the budget** as soon as the card is issued.
+4. When the merchant charges the card, the card network asks AgentGetPay **in real time**. A charge is approved only if it matches: right merchant, right merchant category (MCC, e.g. 7011 = hotel), within the limit, card still open, agent active. Re-using the card, using it elsewhere or for more is **declined on the spot**, and the attempt is recorded.
+5. The real amount replaces the hold. The payment goes into the hash-chained audit log (anchored on BSV) and into the DATEV export, with the card authorization id as the voucher reference.
+
+**The company chooses how each agent pays** (admin page, per agent): BSV (HTTP 402) and/or virtual cards. The default is BSV only; cards must be enabled explicitly, can be limited to some categories (e.g. `travel`), and with **BSV first** (on by default) a card is refused for a merchant that accepts BSV (listed with `accepts` in `config/services.json`, or already paid in BSV). An agent can also be card-only. The AI does not decide: it is told its allowed methods by `check_budget`, and the proxy enforces them.
+
+Card numbers are never stored, only hashes and the last 4 digits. Unused cards expire or can be cancelled on the admin page (**Virtual cards**), which releases the hold.
+
+In this version the issuer and the card network are **simulated** (`src/card/issuer.ts`, `POST /v1/card-network/authorize`, test numbers starting with 4000 00). The demo market accepts these cards on every shop (`"card": {...}` in the order body). For real use, implement `CardIssuer` with an issuing platform (for example Stripe Issuing) and route its real-time authorization webhook to `cardRail.authorize()`; nothing else changes. Test: `npm run test:card`.
+
 ### Accounting export (DATEV)
 
 German accountants work in DATEV. Every paid entry becomes one booking, with the audit log entry as voucher number (`AGP-<n>`) and the BSV transaction as reference.
@@ -197,6 +213,7 @@ Daily spending is rebuilt from the audit log when the proxy starts, so restartin
 | `npm run test:files` | Test upload and download links for remote assistants, offline |
 | `npm run market` | Demo market: fictional shops paid by agents (port 5080) |
 | `npm run test:market` | Test the demo market through the proxy, offline |
+| `npm run test:card` | Test the simulated card rail (virtual cards, real-time authorization), offline |
 | `npm run test:approval` | Test long approvals, refunds and mandates, offline |
 | `npm run test:purchase` | Test the purchase policy (budgets, categories, delivery addresses), offline |
 | `npm run test:local`, `npm run test:proxy` | Offline tests with a fake wallet |

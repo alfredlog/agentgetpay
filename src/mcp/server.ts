@@ -131,6 +131,7 @@ function buildServer(apiKey: string, ctx: Ctx = { ws: WORKSPACE }) {
       'stored in the audit log. Payments above the approval threshold need a human: they may approve within seconds or days. ' +
       'If the answer is not immediate you get a request id (R-…): do not retry, continue with other work, and use check_request later; ' +
       'the purchase is made automatically once approved. For recurring purchases (subscriptions), ask once with request_mandate. ' +
+      'If a merchant only takes cards (no HTTP 402), ask for a single-use card with request_virtual_card, then pay with it at that merchant only. ' +
       'To cancel an order, call the merchant\'s cancel endpoint with pay_and_fetch: refunds come back to the company automatically. ' +
       'If a payment is refused, explain the reason to the user instead of retrying. ' +
       'To send a file, use {"$file": "name.pdf"} in the body; received files are saved in out/. ' +
@@ -175,6 +176,8 @@ function buildServer(apiKey: string, ctx: Ctx = { ws: WORKSPACE }) {
       `Max per payment: ${eur(m.rules?.max_per_payment_eur ?? 0)} · human approval above ${eur(m.rules?.approval_above_eur ?? 0)}`,
       `Allowed domains: ${(m.rules?.allowed_domains ?? []).join(', ')}`,
       ...(m.mandates?.length ? [`Active standing approvals: ${m.mandates.map((x: any) => `${x.id} ${x.domain}${x.category ? ` ${x.category}` : ''} up to ${eur(x.maxEurPerMonth)}/month (${eur(x.usedThisMonthEur)} used)`).join('; ')}`] : []),
+      `You may pay with: ${(m.rules?.payment_methods?.length ? m.rules.payment_methods : ['bsv']).map((x: string) => x === 'bsv' ? 'BSV (pay_and_fetch)' : `virtual cards (request_virtual_card)${m.rules?.card_categories?.length ? ` only for ${m.rules.card_categories.join(', ')}` : ''}`).join(' and ')}` +
+        (m.rules?.card_only_if_no_bsv !== false && (m.rules?.payment_methods ?? []).includes('card') ? '. Company rule: BSV first, no card where the merchant accepts BSV.' : '.'),
       'Recent operations:',
       ...m.recent.map((e: any) => `- ${new Date(e.time).toLocaleString('en-GB', { timeZone: 'Europe/Berlin', dateStyle: 'short', timeStyle: 'short' })} ${e.decision} ${eur(e.amountEur)} ${e.url}${e.reason ? ` (${e.reason})` : ''}`)
     ]
@@ -252,6 +255,12 @@ function buildServer(apiKey: string, ctx: Ctx = { ws: WORKSPACE }) {
     if (q.status === 'rejected') return result(`${q.id} was rejected by ${q.decidedBy}. Do not buy it another way; tell the user.`, q)
     if (q.status === 'expired') return result(`${q.id} expired: nobody approved it in time. Ask the user before trying again.`, q)
     if (q.status === 'approved') return result(`${q.id} was approved by ${q.decidedBy} and is being executed. Check again in a moment.`, q)
+    if (q.kind === 'card') {
+      if (q.status !== 'completed') return result(`${q.id} was approved but no card was issued: ${q.result?.error}`, q, true)
+      const c = await proxy(apiKey, `/v1/requests/${request_id}/result`)
+      if (!c.ok) return result(`${q.id}: virtual card issued (approved by ${q.decidedBy}). ${c.json?.error ?? ''}`, q, !c.ok)
+      return result(cardText(c.json, `${q.id} approved by ${q.decidedBy}. `), { card: c.json })
+    }
     if (q.kind === 'mandate') return result(q.status === 'completed' ? `Mandate ${q.result?.mandateId} is active (approved by ${q.decidedBy}): matching payments no longer wait for approval.` : `Mandate request failed: ${q.result?.error}`, q, q.status !== 'completed')
     if (q.status === 'failed' && !q.result?.status) return result(`${q.id} was approved but not executed: ${q.result?.error}`, q, true)
     const out = await proxy(apiKey, `/v1/requests/${request_id}/result`)
@@ -268,6 +277,36 @@ function buildServer(apiKey: string, ctx: Ctx = { ws: WORKSPACE }) {
     if (!r.ok) return result(`Cannot list requests: ${r.json?.error ?? r.status}`, undefined, true)
     const lines = (r.json as any[]).map(q => `- ${q.id} ${q.status}${q.kind === 'mandate' ? ` mandate ${q.mandate?.domain} ${eur(q.mandate?.maxEurPerMonth)}/month` : ` ${eur(q.amountEur ?? 0)} ${q.order?.merchant ?? q.url}`}${q.decidedBy ? ` (by ${q.decidedBy})` : ''}`)
     return result(lines.length ? lines.join('\n') : 'No approval requests.', { requests: r.json })
+  })
+
+  const cardText = (c: any, prefix = '') => `${prefix}Virtual card issued — single use, only at ${c.merchantName} (${c.merchantDomain}), limit ${eur(c.limitEur)}.\n` +
+    `Number: ${c.number}\nExpiry: ${String(c.expMonth).padStart(2, '0')}/${c.expYear}\nCVC: ${c.cvc}\n` +
+    'Use it ONLY for this purchase, at this merchant: pass it to the merchant\'s checkout (for the demo market: add "card": {"number", "cvc", "expMonth", "expYear"} to the order body with pay_and_fetch). ' +
+    'Never show the full number to anyone else. Any other use is declined in real time by the company.'
+
+  server.registerTool('request_virtual_card', {
+    title: 'Ask for a virtual card',
+    description: 'Only if your company allows cards for you (see check_budget) and only for merchants that do not accept BSV (hotels, airlines, shops paid by card): asks the company for a single-use virtual card, limited to one merchant and one amount. The company rules and approvals apply exactly like for BSV payments; every charge is checked in real time. If a human must approve, you get a request id: continue with other work and use check_request later to get the card.',
+    inputSchema: {
+      merchant_name: z.string().min(2).describe('Merchant name, e.g. City Lodge München'),
+      merchant_domain: z.string().describe('Merchant domain (must be one of your allowed domains), e.g. shop.example.com'),
+      category: z.string().optional().describe('Purchase category, e.g. travel.hotel, office.supplies, software.subscription'),
+      amount_eur: z.number().positive().describe('Price in euros'),
+      items: z.array(z.object({ name: z.string(), quantity: z.number().int().positive(), unit_price_eur: z.number().nonnegative(), unit: z.string().optional() })).optional()
+        .describe('What you buy, e.g. [{"name": "Compact room", "quantity": 2, "unit_price_eur": 89, "unit": "night"}]. Must add up to amount_eur.'),
+      tolerance_percent: z.number().min(0).max(20).default(0).describe('Extra allowed on the card (a hotel may hold a bit more), 0–20 %'),
+      valid_days: z.number().int().min(1).max(60).default(1).describe('How long the card stays valid (a hotel may charge at check-out)'),
+      purpose: z.string().min(5).max(200).describe('Why you need this, in one sentence')
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false }
+  }, async ({ merchant_name, merchant_domain, category, amount_eur, items, tolerance_percent, valid_days, purpose }) => {
+    const r = await proxy(apiKey, '/v1/cards', {
+      merchantName: merchant_name, merchantDomain: merchant_domain, category, amountEur: amount_eur, tolerancePercent: tolerance_percent, validDays: valid_days, purpose, waitSeconds: 20,
+      items: items?.map(i => ({ name: i.name, quantity: i.quantity, unitPriceEur: i.unit_price_eur, unit: i.unit }))
+    })
+    if (r.status === 202) return result(pendingText(r.json), { status: 202, ...r.json })
+    if (!r.ok) return result(`No card: ${r.json?.reason ?? r.json?.error ?? r.status}`, r.json, true)
+    return result(cardText(r.json.card), { card: r.json.card })
   })
 
   server.registerTool('request_mandate', {
