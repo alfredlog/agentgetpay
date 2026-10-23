@@ -137,7 +137,7 @@ Merchants can describe what they sell in the 402 offer (`extensions.order`: merc
 - **Delivery addresses**: goods can only be shipped to the company's addresses (written variants such as "Leopoldstr." / "Leopoldstraße" or "Muenchen" / "München" are recognised).
 - The order (merchant, category, items) is stored in the audit log and shown on the dashboard.
 
-Everything is set on the admin page under **Purchase rules**. The demo seller (`npm run seller`) includes three fictional shops that describe their orders: a hotel (`/api/hotel/book`), office supplies (`/api/office/order`) and a software subscription (`/api/software/subscribe`). Test: `npm run test:purchase`.
+Everything is set on the admin page under **Purchase rules**. A **demo market** (`npm run market`) runs fictional shops agents can buy from (hotels in Munich, office supplies with delivery, software subscriptions), with free catalogs at `/api`, paid orders, and a storefront that lists the latest orders paid by agents. It is built with the **seller kit** (`src/shared/seller-kit.ts`): any Express API can charge agents in a few lines. Test: `npm run test:market`. The demo seller (`npm run seller`) includes three fictional shops that describe their orders: a hotel (`/api/hotel/book`), office supplies (`/api/office/order`) and a software subscription (`/api/software/subscribe`). Test: `npm run test:purchase`.
 
 ### Accounting export (DATEV)
 
@@ -185,6 +185,8 @@ Daily spending is rebuilt from the audit log when the proxy starts, so restartin
 | `npm run mcp:config` | Print the MCP configuration to paste into an assistant |
 | `npm run test:oauth` | Test the OAuth connection of assistants, offline |
 | `npm run test:files` | Test upload and download links for remote assistants, offline |
+| `npm run market` | Demo market: fictional shops paid by agents (port 5080) |
+| `npm run test:market` | Test the demo market through the proxy, offline |
 | `npm run test:purchase` | Test the purchase policy (budgets, categories, delivery addresses), offline |
 | `npm run test:local`, `npm run test:proxy` | Offline tests with a fake wallet |
 
