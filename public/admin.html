@@ -103,6 +103,12 @@
       <div id="n-key"></div>
     </section>
 
+    <h2>Virtual cards</h2>
+    <section class="card" style="max-width:760px">
+      <div class="meta" style="margin-bottom:10px">Single-use cards issued to agents for merchants that do not accept BSV. Each one is limited to one merchant and one amount; every charge is checked in real time.</div>
+      <div id="k-list"></div>
+    </section>
+
     <h2>Standing approvals (mandates)</h2>
     <section class="card" style="max-width:760px">
       <div class="meta" style="margin-bottom:10px">Recurring purchases approved once (subscriptions…). Matching payments no longer wait for approval; budgets and other rules still apply. Agents ask for them; you approve them on Telegram or the dashboard.</div>
@@ -171,6 +177,21 @@ async function load() {
   for (const a of agents) wire(a)
   await loadViewers()
   await loadMandates()
+  await loadCards()
+}
+
+async function loadCards() {
+  const list = await api('/cards')
+  const pill = { active: 'ok', used: '', expired: 'bad', cancelled: 'bad' }
+  $('k-list').innerHTML = list.length ? list.slice(0, 30).map(c => `<div class="top" style="padding:6px 0;border-bottom:1px solid var(--line);margin:0">
+      <span><b>•••• ${esc(c.last4)}</b> · ${esc(c.agentId)} → ${esc(c.merchantName)} <span class="hint">(${esc(c.merchantDomain)}${c.category ? ` · ${esc(c.category)}` : ''})</span><br>
+      <span class="hint">limit ${eur(c.limitEur)}${c.authorizedEur !== undefined ? ` · charged ${eur(c.authorizedEur)}` : ''}${c.declines ? ` · ${c.declines} declined attempt(s)` : ''} · ${c.approvedBy ? `approved by ${esc(c.approvedBy)}` : 'within policy'} · valid until ${new Date(c.validUntil).toLocaleDateString()}</span></span>
+      ${c.status === 'active' ? `<button class="danger" data-kcancel="${esc(c.cardId)}">Cancel</button>` : `<span class="pill ${pill[c.status] ?? ''}">${esc(c.status)}</span>`}</div>`).join('')
+    : '<div class="hint">No virtual card yet.</div>'
+  $('k-list').querySelectorAll('[data-kcancel]').forEach(b => b.onclick = async () => {
+    b.disabled = true
+    try { await api('/cards/' + b.dataset.kcancel, 'DELETE'); await loadCards() } catch (e) { b.disabled = false }
+  })
 }
 
 async function loadMandates() {
