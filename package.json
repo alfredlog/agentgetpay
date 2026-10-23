@@ -24,7 +24,9 @@
     "mcp:config": "tsx src/mcp/print-config.ts",
     "test:oauth": "tsx src/test/oauth-flow.ts",
     "test:files": "tsx src/test/files-flow.ts",
-    "test:purchase": "tsx src/test/purchase-flow.ts"
+    "test:purchase": "tsx src/test/purchase-flow.ts",
+    "market": "tsx src/market/server.ts",
+    "test:market": "tsx src/test/market-flow.ts"
   },
   "dependencies": {
     "@bsv/sdk": "^3.2.1",
