@@ -103,6 +103,12 @@
       <div id="n-key"></div>
     </section>
 
+    <h2>Standing approvals (mandates)</h2>
+    <section class="card" style="max-width:760px">
+      <div class="meta" style="margin-bottom:10px">Recurring purchases approved once (subscriptions…). Matching payments no longer wait for approval; budgets and other rules still apply. Agents ask for them; you approve them on Telegram or the dashboard.</div>
+      <div id="m-list"></div>
+    </section>
+
     <h2>Dashboard access</h2>
     <section class="card" style="max-width:560px">
       <div class="meta" style="margin-bottom:10px">People who can <b>view</b> the dashboard and download the exports (for example your accountant). They cannot change agents or rules.</div>
@@ -164,6 +170,20 @@ async function load() {
   $('agents').innerHTML = agents.map(card).join('')
   for (const a of agents) wire(a)
   await loadViewers()
+  await loadMandates()
+}
+
+async function loadMandates() {
+  const list = await api('/mandates')
+  $('m-list').innerHTML = list.length ? list.map(m => `<div class="top" style="padding:6px 0;border-bottom:1px solid var(--line);margin:0">
+      <span><b>${esc(m.id)}</b> · ${esc(m.agentId)} → ${esc(m.domain)}${m.category ? ` (${esc(m.category)})` : ''}<br>
+      <span class="hint">${eur(m.usedThisMonthEur)} of ${eur(m.maxEurPerMonth)} this month · approved by ${esc(m.approvedBy)} · ${m.active ? `until ${new Date(m.validUntil).toLocaleDateString()}` : m.revokedAt ? `revoked by ${esc(m.revokedBy)}` : 'expired'}</span></span>
+      ${m.active ? `<button class="danger" data-mrevoke="${esc(m.id)}">Revoke</button>` : '<span class="pill bad">Inactive</span>'}</div>`).join('')
+    : '<div class="hint">No standing approval yet.</div>'
+  $('m-list').querySelectorAll('[data-mrevoke]').forEach(b => b.onclick = async () => {
+    b.disabled = true
+    try { await api('/mandates/' + b.dataset.mrevoke, 'DELETE'); await loadMandates() } catch (e) { b.disabled = false }
+  })
 }
 
 // Accès au tableau de bord en lecture seule

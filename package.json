@@ -26,7 +26,8 @@
     "test:files": "tsx src/test/files-flow.ts",
     "test:purchase": "tsx src/test/purchase-flow.ts",
     "market": "tsx src/market/server.ts",
-    "test:market": "tsx src/test/market-flow.ts"
+    "test:market": "tsx src/test/market-flow.ts",
+    "test:approval": "tsx src/test/approval-flow.ts"
   },
   "dependencies": {
     "@bsv/sdk": "^3.2.1",

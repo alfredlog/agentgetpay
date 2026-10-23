@@ -26,9 +26,16 @@ export class MemoryBudgetStore implements BudgetStore {
   restoreFrom(entries: LedgerEntry[]) {
     const today = dayOf(new Date()), month = monthOf(new Date())
     this.spent.clear()
+    const payments = new Map<string, LedgerEntry>()
     for (const e of entries) {
+      if (e.decision === 'allow' && e.txid) payments.set(e.txid, e)
       if (monthOf(e.ts) !== month) continue
       if (isBudgetReset(e)) { if (dayOf(e.ts) === today) this.spent.delete(this.dayKey(e.agentId)); continue }
+      if (e.decision === 'refund') {
+        const orig = e.refundOf ? payments.get(e.refundOf) : undefined
+        if (orig) this.credit(e.agentId, e.amountSats, orig.order?.category, orig.ts)
+        continue
+      }
       if (e.decision !== 'allow') continue
       if (dayOf(e.ts) === today) this.add(this.dayKey(e.agentId), e.amountSats)
       this.add(this.monthKey(e.agentId), e.amountSats)
@@ -53,6 +60,14 @@ export class MemoryBudgetStore implements BudgetStore {
   }
 
   async reset(agentId: string) { this.spent.delete(this.dayKey(agentId)) }
+
+  // Remboursement : rend le montant au jour, au mois et à la catégorie du paiement d'origine (s'ils sont en cours)
+  credit(agentId: string, sats: number, category: string | undefined, originalTs: string) {
+    if (monthOf(originalTs) !== monthOf(new Date())) return
+    if (dayOf(originalTs) === dayOf(new Date())) this.add(this.dayKey(agentId), -sats)
+    this.add(this.monthKey(agentId), -sats)
+    if (category) this.addCategory(agentId, category, -sats)
+  }
 
   async release(agentId: string, sats: number, category?: string) {
     this.add(this.dayKey(agentId), -sats)

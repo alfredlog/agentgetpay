@@ -10,9 +10,9 @@
 // (par exemple pour rembourser) sans rien stocker d'autre que ce secret.
 import type { Request, Response, NextFunction } from 'express'
 import { randomBytes } from 'node:crypto'
-import { PrivateKey, Hash, Utils, P2PKH, Transaction, WhatsOnChainBroadcaster } from '@bsv/sdk'
+import { PrivateKey, Hash, Utils, P2PKH, Transaction, WhatsOnChainBroadcaster, LockingScript } from '@bsv/sdk'
 import {
-  NETWORK, PaymentRequired, PaymentRequirements, PaymentPayload, PaymentResponse, OrderInfo, encode, decode
+  NETWORK, PaymentRequired, PaymentRequirements, PaymentPayload, PaymentResponse, OrderInfo, RefundNotice, encode, decode
 } from './x402.js'
 
 export interface Invoice {
@@ -24,7 +24,12 @@ export interface Invoice {
   expiresAt: Date
   settledTxid?: string
   order?: string // commande facturée (JSON) : la requête payée doit décrire exactement la même
+  rawtx?: string           // la transaction de paiement (pour pouvoir rembourser)
+  refundScriptHex?: string // où rembourser : l'adresse donnée par le payeur, sinon sa monnaie
 }
+
+// Ce qu'il faut garder d'une facture payée pour la rembourser plus tard (même après un redémarrage)
+export type PaidInvoice = Pick<Invoice, 'id' | 'amount' | 'lockingScriptHex'> & { settledTxid: string; rawtx: string; refundScriptHex: string }
 
 // Prix fixe, ou prix calculé à partir de la requête avec la description de la commande
 export type Pricing = number | ((req: Request) => { amount: number; order?: OrderInfo } | { error: string })
@@ -135,8 +140,14 @@ export function createSeller(o: SellerOptions) {
           if (r.status !== 'success' && !known) return fail(res, 402, 'broadcast_rejected', { retryable: false, detail: r })
         }
 
-        // 5. Facture réglée → on sert la ressource
+        // 5. Facture réglée → on sert la ressource. On garde de quoi rembourser.
         inv.settledTxid = txid
+        inv.rawtx = p.payload.rawtx
+        try {
+          const to = p.extensions?.refundTo
+          inv.refundScriptHex = to ? new P2PKH().lock(to).toHex()
+            : tx.outputs.find(out => out.lockingScript.toHex().toLowerCase() !== script)?.lockingScript.toHex() // la monnaie du payeur
+        } catch { inv.refundScriptHex = undefined }
         log(`Paid: ${inv.amount} sats for ${resource} — tx ${txid}`)
         serve(txid, true)
       } finally {
@@ -154,5 +165,35 @@ export function createSeller(o: SellerOptions) {
     }
   }
 
-  return { requirePayment, invoiceKey, invoices }
+  // Rembourse une facture payée : renvoie l'argent au payeur (moins les frais du réseau, et moins keepSats
+  // si le vendeur garde des frais d'annulation). Le résultat va dans l'en-tête PAYMENT-REFUND de la réponse.
+  async function refund(inv: PaidInvoice, keepSats = 0): Promise<RefundNotice> {
+    const paidTx = Transaction.fromHex(inv.rawtx)
+    const index = paidTx.outputs.findIndex(out => out.lockingScript.toHex().toLowerCase() === inv.lockingScriptHex)
+    if (index < 0) throw new Error('Payment output not found')
+    const value = paidTx.outputs[index].satoshis ?? 0
+    const tx = new Transaction()
+    tx.addInput({ sourceTransaction: paidTx, sourceOutputIndex: index, unlockingScriptTemplate: new P2PKH().unlock(invoiceKey(inv.id)) })
+    if (keepSats > 0) tx.addOutput({ lockingScript: new P2PKH().lock(invoiceKey(inv.id).toAddress('testnet')), satoshis: Math.min(keepSats, value) })
+    tx.addOutput({ lockingScript: LockingScript.fromHex(inv.refundScriptHex), change: true })
+    await tx.fee()
+    const back = tx.outputs.at(-1)?.satoshis ?? 0
+    if (back < 1) throw new Error('Amount too small to refund after network fees')
+    await tx.sign()
+    if (!o.skipBroadcast) {
+      const r = await tx.broadcast(new WhatsOnChainBroadcaster('test'))
+      if (r.status !== 'success' && !/already|known|txn-already/i.test(JSON.stringify(r))) throw new Error(`Refund rejected by the network: ${JSON.stringify(r).slice(0, 200)}`)
+    }
+    const notice = { paymentTxid: inv.settledTxid, refundTxid: tx.id('hex'), rawtx: tx.toHex(), sats: back }
+    log(`Refunded ${back} sats for ${inv.settledTxid} — tx ${notice.refundTxid}`)
+    return notice
+  }
+  const refundHeader = (n: RefundNotice) => encode(n)
+
+  // Données à garder pour un remboursement futur
+  const paidRecord = (inv: Invoice): PaidInvoice | undefined => inv.settledTxid && inv.rawtx && inv.refundScriptHex
+    ? { id: inv.id, amount: inv.amount, lockingScriptHex: inv.lockingScriptHex, settledTxid: inv.settledTxid, rawtx: inv.rawtx, refundScriptHex: inv.refundScriptHex }
+    : undefined
+
+  return { requirePayment, invoiceKey, invoices, refund, refundHeader, paidRecord }
 }
