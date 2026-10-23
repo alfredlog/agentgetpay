@@ -1,4 +1,4 @@
-// Un "agent" qui appelle l'API payante et paie tout seul.
+// An "agent" that calls the paid API and pays by itself.
 import 'dotenv/config'
 import { PrivateKey, P2PKH } from '@bsv/sdk'
 import { payFetch } from './pay-fetch.js'

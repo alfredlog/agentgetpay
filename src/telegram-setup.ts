@@ -1,13 +1,13 @@
-// Trouve ton chat_id Telegram et l'enregistre dans .env.
-// Avant : crée un bot avec @BotFather, mets TELEGRAM_BOT_TOKEN dans .env, puis envoie "bonjour" à ton bot.
+// Finds your Telegram chat_id and saves it in .env.
+// Before: create a bot with @BotFather, put TELEGRAM_BOT_TOKEN in .env, then send "hello" to your bot.
 import 'dotenv/config'
 import { appendFileSync, readFileSync } from 'node:fs'
 
 const token = process.env.TELEGRAM_BOT_TOKEN
 if (!token) throw new Error('Add TELEGRAM_BOT_TOKEN=... to .env (from @BotFather)')
 
-// allowed_updates=["message"] : le proxy demande à Telegram de ne lui envoyer que les clics sur les boutons,
-// et Telegram garde ce réglage. On redemande explicitement les messages, sinon "bonjour" resterait invisible.
+// allowed_updates=["message"]: the proxy asks Telegram to only send it button clicks,
+// and Telegram keeps that setting. We explicitly ask for messages again, otherwise "hello" would stay invisible.
 const res = await fetch(`https://api.telegram.org/bot${token}/getUpdates?allowed_updates=${encodeURIComponent('["message","callback_query"]')}`)
 const data = (await res.json()) as { ok: boolean; result: any[]; description?: string }
 if (!data.ok) throw new Error(`Token rejected by Telegram: ${data.description}`)

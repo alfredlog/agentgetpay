@@ -1,14 +1,14 @@
-// Budgets en mémoire. Node.js exécute ce code sans interruption, donc la réservation est atomique.
-// Trois compteurs par agent : le jour, le mois, et le mois par catégorie d'achat (hôtel, fournitures…).
-// Au démarrage, ils sont recalculés depuis le journal d'audit : redémarrer le proxy ne remet PAS les budgets à zéro.
-// En entreprise (plusieurs serveurs), on remplace par Redis avec un script atomique.
+// In-memory budgets. Node.js runs this code without interruption, so the reservation is atomic.
+// Three counters per agent: the day, the month, and the month per purchase category (hotel, supplies…).
+// At startup they are rebuilt from the audit log: restarting the proxy does NOT reset the budgets.
+// In an enterprise setup (several servers), replace this with Redis and an atomic script.
 import { BudgetStore, BudgetLimits, LedgerEntry } from './types.js'
 
-// Le "jour" et le "mois" d'un budget suivent l'heure de Berlin (minuit à Berlin, pas minuit UTC)
+// A budget's "day" and "month" follow Berlin time (midnight in Berlin, not midnight UTC)
 export const dayOf = (d: Date | string) => new Date(d).toLocaleDateString('sv-SE', { timeZone: 'Europe/Berlin' })
 export const monthOf = (d: Date | string) => dayOf(d).slice(0, 7)
 
-// Une remise à zéro faite dans l'administration (ne concerne que le compteur du jour)
+// A reset made on the admin page (only affects the daily counter)
 export const isBudgetReset = (e: LedgerEntry) =>
   e.decision === 'admin' && (e.action === 'budget_reset' || (e.reason ?? '').startsWith("Today's spending reset"))
 
@@ -17,12 +17,12 @@ export class MemoryBudgetStore implements BudgetStore {
   private dayKey = (a: string) => `${a}|d|${dayOf(new Date())}`
   private monthKey = (a: string, cat?: string) => `${a}|m|${monthOf(new Date())}${cat ? `|${cat}` : ''}`
   private add(k: string, sats: number) { this.spent.set(k, Math.max(0, (this.spent.get(k) ?? 0) + sats)) }
-  // "travel.hotel" compte aussi dans "travel" : un plafond peut porter sur la catégorie ou sa famille
+  // "travel.hotel" also counts in "travel": a limit can apply to the category or to its family
   private addCategory(a: string, category: string, sats: number) {
     for (let c = category; c; c = c.includes('.') ? c.slice(0, c.lastIndexOf('.')) : '') this.add(this.monthKey(a, c), sats)
   }
 
-  // Recalcule les compteurs du jour et du mois depuis le journal
+  // Rebuilds the daily and monthly counters from the audit log
   restoreFrom(entries: LedgerEntry[]) {
     const today = dayOf(new Date()), month = monthOf(new Date())
     this.spent.clear()
@@ -61,7 +61,7 @@ export class MemoryBudgetStore implements BudgetStore {
 
   async reset(agentId: string) { this.spent.delete(this.dayKey(agentId)) }
 
-  // Remboursement : rend le montant au jour, au mois et à la catégorie du paiement d'origine (s'ils sont en cours)
+  // Refund: gives the amount back to the day, month and category of the original payment (if still current)
   credit(agentId: string, sats: number, category: string | undefined, originalTs: string) {
     if (monthOf(originalTs) !== monthOf(new Date())) return
     if (dayOf(originalTs) === dayOf(new Date())) this.add(this.dayKey(agentId), -sats)

@@ -1,17 +1,17 @@
-// Petit client pour l'API WhatsOnChain (testnet).
+// Small client for the WhatsOnChain API (testnet).
 const WOC = 'https://api.whatsonchain.com/v1/bsv/test'
 
 export interface Utxo {
   tx_hash: string
   tx_pos: number
-  value: number // en satoshis
-  height: number // 0 = pas encore confirmée (dans le mempool)
+  value: number // in satoshis
+  height: number // 0 = not confirmed yet (in the mempool)
 }
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
-// WhatsOnChain gratuit limite le nombre de requêtes par seconde : au-delà, il répond 429
-// ("Too Many Requests"). On attend alors un peu et on réessaie, de plus en plus longtemps.
+// Free WhatsOnChain limits the number of requests per second: beyond that it answers 429
+// ("Too Many Requests"). We then wait a bit and retry, longer and longer.
 async function wocFetch(url: string, tries = 5): Promise<Response> {
   for (let i = 1; ; i++) {
     const res = await fetch(url)
@@ -24,13 +24,13 @@ async function wocFetch(url: string, tries = 5): Promise<Response> {
 
 interface WocUnspent extends Utxo { isSpentInMempoolTx?: boolean }
 
-// On combine les pièces confirmées et non confirmées, et on enlève celles déjà dépensées
-// dans le mempool. (L'ancienne route /unspent ne voit pas ces dépenses : elle renvoie
-// des pièces déjà dépensées, ce qui provoque des doubles dépenses refusées.)
+// We combine confirmed and unconfirmed coins, and remove those already spent
+// in the mempool. (The old /unspent route does not see these spends: it returns
+// coins that are already spent, which causes rejected double spends.)
 export async function getUtxos(address: string): Promise<Utxo[]> {
   const lists = await Promise.all(['confirmed', 'unconfirmed'].map(async kind => {
     const res = await wocFetch(`${WOC}/address/${address}/${kind}/unspent`)
-    // Une adresse toute neuve, qui n'a jamais rien reçu, est inconnue de WhatsOnChain : 404 = aucune pièce.
+    // A brand-new address that never received anything is unknown to WhatsOnChain: 404 = no coins.
     if (res.status === 404) return []
     if (!res.ok) throw new Error(`WhatsOnChain responded ${res.status}`)
     const body = (await res.json()) as { result?: WocUnspent[] }
@@ -38,11 +38,11 @@ export async function getUtxos(address: string): Promise<Utxo[]> {
   }))
   return lists.flat()
     .filter(u => !u.isSpentInMempoolTx)
-    .sort((a, b) => b.value - a.value) // la plus grosse pièce d'abord : évite les miettes
+    .sort((a, b) => b.value - a.value) // the largest coin first: avoids dust
 }
 
-// Une transaction toute récente peut renvoyer 404 quelques secondes :
-// WhatsOnChain ne l'a pas encore indexée. On réessaie donc plusieurs fois.
+// A very recent transaction may return 404 for a few seconds:
+// WhatsOnChain has not indexed it yet. So we retry several times.
 export async function getTxHex(txid: string, tries = 5): Promise<string> {
   for (let i = 1; i <= tries; i++) {
     const res = await wocFetch(`${WOC}/tx/${txid}/hex`)

@@ -1,8 +1,8 @@
-// Fichiers en mode "connecteur" (assistant connecté à distance, ex. Claude sur claude.ai).
-// L'assistant ne peut pas transmettre un fichier de l'ordinateur de l'utilisateur. Alors :
-//   - il donne un LIEN DE DÉPÔT : l'utilisateur l'ouvre, choisit son PDF, le fichier arrive dans le dossier de l'agent (in/) ;
-//   - pour chaque fichier produit (out/), il donne un LIEN DE TÉLÉCHARGEMENT.
-// Les liens sont secrets et temporaires (dépôt : 15 min, téléchargement : 24 h), et chaque agent a son propre dossier.
+// Files in "connector" mode (assistant connected remotely, e.g. Claude on claude.ai).
+// The assistant cannot pass on a file from the user's computer. So:
+//   - it gives an UPLOAD LINK: the user opens it, picks the PDF, and the file lands in the agent's folder (in/);
+//   - for each file it produces (out/), it gives a DOWNLOAD LINK.
+// Links are secret and temporary (upload: 15 min, download: 24 h), and each agent has its own folder.
 import express from 'express'
 import { randomBytes } from 'node:crypto'
 import { mkdir, readdir, stat, writeFile, realpath } from 'node:fs/promises'
@@ -15,7 +15,7 @@ interface Link { kind: 'upload' | 'download'; ws: string; file?: string; exp: nu
 
 const esc = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!))
 
-// Nom de fichier sûr : pas de dossier, pas de caractère spécial
+// Safe file name: no folder, no special character
 export function safeName(name: string) {
   const base = basename(String(name)).normalize('NFKD').replace(/[^\w.\- ]+/g, '').replace(/\s+/g, '-').replace(/^\.+/, '').slice(0, 80)
   return base || 'file'
@@ -76,7 +76,7 @@ export class FileLinks {
       if ((await dirSize(l.ws)) + buf.length > this.maxWorkspaceMb * 1024 * 1024) return res.status(413).json({ error: `The agent's folder is full (${this.maxWorkspaceMb} MB)` })
       const inDir = join(l.ws, 'in')
       await mkdir(inDir, { recursive: true })
-      // Ne jamais écraser : facture.pdf, facture-2.pdf, facture-3.pdf…
+      // Never overwrite: invoice.pdf, invoice-2.pdf, invoice-3.pdf…
       const name = safeName(String(req.query.name ?? 'file'))
       const stem = basename(name, extname(name)), ext = extname(name)
       let file = name
@@ -100,7 +100,7 @@ export class FileLinks {
         res.status(404).send(page('File not found', '<p>This file no longer exists.</p>'))
       }
     })
-    // Fichier trop gros : message clair au lieu d'une erreur technique
+    // File too large: a clear message instead of a technical error
     r.use('/files', ((err, _req, res, next) => {
       if ((err as { type?: string })?.type === 'entity.too.large') return res.status(413).json({ error: `File larger than ${this.maxFileMb} MB` })
       next(err)

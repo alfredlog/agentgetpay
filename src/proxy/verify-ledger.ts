@@ -1,6 +1,6 @@
-// Vérification INDÉPENDANTE du journal, comme le ferait un auditeur :
-// 1. la chaîne de hashes locale est-elle cohérente ?
-// 2. les entrées ancrées correspondent-elles aux preuves publiées sur BSV ?
+// INDEPENDENT verification of the log, as an auditor would do it:
+// 1. is the local hash chain consistent?
+// 2. do the anchored entries match the proofs published on BSV?
 import { JsonlLedger } from './ledger.js'
 import { AnchorLog, verifyAgainstChain, cachedWocFetch } from './anchor.js'
 

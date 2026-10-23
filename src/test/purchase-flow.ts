@@ -1,5 +1,5 @@
-// Test de la politique d'achats : budgets jour/mois, catégories, prix par unité, adresses de livraison.
-// Faux portefeuille, fausse blockchain, boutiques de démonstration : rien n'est payé, rien n'est touché chez toi.
+// Test of the purchase policy: daily/monthly budgets, categories, price per unit, delivery addresses.
+// Fake wallet, fake blockchain, demo shops: nothing is paid, nothing on your machine is touched.
 import { mkdtempSync, cpSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -56,7 +56,7 @@ try {
   const bad = await admin('/agents/einkauf-test', 'PUT', { rules: { ...rules, monthly_budget_eur: 100 } })
   check(/monthly budget cannot be lower/i.test(bad.error ?? ''), 'Admin cannot set a monthly budget below the daily budget')
 
-  // Hôtel
+  // Hotel
   let r = await buy('/api/hotel/book', { room: 'standard', nights: 2 }, 'Hotel for the TBC26 fair')
   check(r.status === 200 && /^HA-/.test(r.json.confirmation), 'Hotel: 2 nights at €120 are booked')
   r = await buy('/api/hotel/book', { room: 'suite', nights: 1 })
@@ -72,33 +72,33 @@ try {
   r = await buy('/api/office/order', { items: [{ sku: 'monitor', quantity: 1 }], shipTo: company })
   check(r.status === 403 && /€250\.00 per item exceeds the office.supplies limit/.test(r.json.reason), 'Office: a €250 monitor is refused (max €50 per item)')
 
-  // Catégorie non prévue
+  // Category not provided for
   r = await buy('/api/software/subscribe', {})
   check(r.status === 403 && /category not allowed: software.subscription/.test(r.json.reason), 'Software subscription refused: category not allowed for this agent')
 
-  // Ce que voit l'agent
+  // What the agent sees
   const me = await fetch(`${PROXY}/v1/me`, { headers: { Authorization: `Bearer ${key}` } }).then(x => x.json()) as any
   check(Math.abs(me.spentMonthEur - 250) < 0.001 && Math.abs(me.categories.travel.spentMonthEur - 240) < 0.001, `Agent sees €${me.spentMonthEur} spent this month, €${me.categories?.travel?.spentMonthEur} on travel`)
 
-  // Le journal garde la commande
+  // The audit log keeps the order
   const ledger = await fetch(`${PROXY}/v1/ledger`).then(x => x.json()) as any[]
   const hotel = ledger.find(e => e.decision === 'allow' && e.order?.category === 'travel.hotel')
   check(hotel?.order?.merchant === 'Hotel Alpenblick (demo)' && hotel.order.items[0].quantity === 2, 'Audit log records merchant, category and items')
   const change = ledger.find(e => e.decision === 'admin' && /Agent created/.test(e.reason))
   check(!!change, 'Agent creation recorded in the audit log')
 
-  // Redémarrage : les compteurs du mois et des catégories sont recalculés depuis le journal
+  // Restart: monthly and category counters are rebuilt from the audit log
   proxy.kill(); await sleep(500)
   proxy = startProxy(); await waitUp()
   r = await buy('/api/hotel/book', { room: 'standard', nights: 1 })
   check(r.status === 403 && /Monthly travel budget exceeded/.test(r.json.reason), 'After a restart, the monthly travel budget is still enforced')
 
-  // Le budget du mois de l'agent : le tableau de bord l'affiche
+  // The agent's monthly budget: the dashboard shows it
   const stats = await fetch(`${PROXY}/v1/stats`).then(x => x.json()) as any
   const s = stats.agents.find((a: any) => a.agentId === 'einkauf-test')
   check(s?.monthlyBudgetEur === 500 && Math.abs(s.spentMonthEur - 250) < 0.001, 'Dashboard shows the monthly budget and what was spent')
 
-  // Règles sauvegardées sur disque
+  // Rules saved on disk
   const saved = JSON.parse(readFileSync(join(dir, 'config/policies.json'), 'utf8'))['einkauf-test']
   check(saved?.categories?.travel?.max_unit_price_eur === 150 && saved.shipping_addresses?.[0]?.city === 'München', 'Rules saved in config/policies.json')
 } catch (e) {

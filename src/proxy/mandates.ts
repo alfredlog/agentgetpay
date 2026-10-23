@@ -1,14 +1,14 @@
-// Mandats : une validation donnée UNE fois pour des achats qui reviennent (abonnement, API au mois…).
-// Exemple : « docs-01 peut payer cloudsoft jusqu'à 30 €/mois pendant 12 mois ».
-// Tant que le mandat est actif, ces paiements n'attendent plus de validation humaine.
-// Le mandat ne contourne JAMAIS les autres règles (domaines, catégories, budgets, livraison).
+// Mandates: an approval given ONCE for purchases that repeat (subscription, monthly API…).
+// Example: "docs-01 may pay cloudsoft up to €30/month for 12 months".
+// While the mandate is active, these payments no longer wait for human approval.
+// A mandate NEVER bypasses the other rules (domains, categories, budgets, delivery).
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import type { MandateTerms } from './requests.js'
 
 export interface Mandate extends MandateTerms {
-  id: string            // ex. "M-4F2A9C"
+  id: string            // e.g. "M-4F2A9C"
   agentId: string
   purpose?: string
   approvedBy: string
@@ -56,7 +56,7 @@ export class MandateStore {
     return m
   }
 
-  // Le mandat qui couvre ce paiement, s'il existe. usedThisMonth(id) = euros déjà payés sous ce mandat ce mois-ci.
+  // The mandate covering this payment, if any. usedThisMonth(id) = euros already paid under this mandate this month.
   covering(agentId: string, host: string, category: string | undefined, amountEur: number, usedThisMonth: (id: string) => number) {
     return this.active(agentId).find(m =>
       m.domain === host &&

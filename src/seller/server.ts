@@ -1,5 +1,5 @@
-// Le VENDEUR : une API qui se fait payer par les agents via HTTP 402 (BRC-166).
-// Dans la démo finale, ce rôle sera joué par PDF Libre.
+// The SELLER: an API that gets paid by agents via HTTP 402 (BRC-166).
+// In the final demo, this role is played by PDF Libre.
 import 'dotenv/config'
 import express from 'express'
 import { randomBytes } from 'node:crypto'
@@ -8,19 +8,19 @@ import { createSeller } from '../shared/seller-kit.js'
 const PORT = Number(process.env.SELLER_PORT ?? 4000)
 const SECRET = process.env.SELLER_SECRET
 if (!SECRET) throw new Error('SELLER_SECRET missing in .env (run npm run wallet)')
-const SKIP_BROADCAST = process.env.SKIP_BROADCAST === '1' // pour tester sans réseau
+const SKIP_BROADCAST = process.env.SKIP_BROADCAST === '1' // for testing without the network
 
 const seller = createSeller({ secret: SECRET, skipBroadcast: SKIP_BROADCAST })
 const requirePayment = seller.requirePayment
 
 const app = express()
 
-// Une ressource payante : 10 satoshis par appel
+// A paid resource: 10 satoshis per call
 app.get('/api/quote', requirePayment(10, 'Quote of the day'), (_req, res) => {
   res.json({ quote: 'The best time to plant a tree was 20 years ago. The second best time is now.' })
 })
 
-// Deux ressources plus chères, pour tester les règles du proxy
+// Two more expensive resources, to test the proxy's rules
 app.get('/api/analysis', requirePayment(18, 'Market analysis'), (_req, res) => {
   res.json({ analysis: 'The market for AI agent payments is growing fast.' })
 })
@@ -29,8 +29,8 @@ app.get('/api/report', requirePayment(30, 'Full report'), (_req, res) => {
 })
 
 // ---------------------------------------------------------------------------
-// Boutiques de démonstration (fictives) : le marchand DÉCRIT ce qu'il vend dans l'offre 402,
-// pour que le proxy de l'acheteur applique sa politique d'achats (catégorie, prix unitaire, livraison).
+// Demo shops (fictional): the merchant DESCRIBES what it sells in the 402 offer,
+// so the buyer's proxy can apply its purchase policy (category, unit price, delivery).
 // ---------------------------------------------------------------------------
 app.use(express.json())
 
@@ -79,5 +79,5 @@ app.post('/api/software/subscribe', requirePayment(() => ({
   res.json({ subscription: `CN-${randomBytes(3).toString('hex').toUpperCase()}`, period: '1 month' })
 })
 
-// Seulement sur cet ordinateur par défaut (SELLER_HOST=0.0.0.0 pour l'ouvrir au réseau)
+// Only on this computer by default (SELLER_HOST=0.0.0.0 to open it to the network)
 app.listen(PORT, process.env.SELLER_HOST ?? '127.0.0.1', () => console.log(`Seller ready on http://localhost:${PORT} — /api/quote (10 sats), /api/analysis (18), /api/report (30), demo shops: /api/hotel/book, /api/office/order, /api/software/subscribe`))

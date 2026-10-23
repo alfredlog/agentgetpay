@@ -1,13 +1,13 @@
-// Kit vendeur : fait payer n'importe quelle route Express par des agents IA, via HTTP 402 (x402 / BRC-166, BSV).
+// Seller kit: lets AI agents pay for any Express route, via HTTP 402 (x402 / BRC-166, BSV).
 //
 //   const seller = createSeller({ secret: process.env.SELLER_SECRET! })
 //   app.get('/api/report', seller.requirePayment(30, 'Full report'), (req, res) => res.json({ ... }))
 //
-// Le prix peut aussi être calculé à partir de la requête, avec la description de la commande
-// (marchand, catégorie, articles, livraison) : l'acheteur peut alors appliquer sa politique d'achats.
+// The price can also be computed from the request, with the order description
+// (merchant, category, items, delivery): the buyer can then apply its purchase policy.
 //
-// Chaque facture a sa propre adresse, dérivée du secret du vendeur : il peut retrouver la clé plus tard
-// (par exemple pour rembourser) sans rien stocker d'autre que ce secret.
+// Each invoice has its own address, derived from the seller's secret: the key can be recovered later
+// (for example to refund) without storing anything but this secret.
 import type { Request, Response, NextFunction } from 'express'
 import { randomBytes } from 'node:crypto'
 import { PrivateKey, Hash, Utils, P2PKH, Transaction, WhatsOnChainBroadcaster, LockingScript } from '@bsv/sdk'
@@ -23,33 +23,33 @@ export interface Invoice {
   payTo: string
   expiresAt: Date
   settledTxid?: string
-  order?: string // commande facturée (JSON) : la requête payée doit décrire exactement la même
-  rawtx?: string           // la transaction de paiement (pour pouvoir rembourser)
-  refundScriptHex?: string // où rembourser : l'adresse donnée par le payeur, sinon sa monnaie
+  order?: string // invoiced order (JSON): the paid request must describe exactly the same one
+  rawtx?: string           // the payment transaction (to be able to refund)
+  refundScriptHex?: string // where to refund: the address given by the payer, otherwise their change
 }
 
-// Ce qu'il faut garder d'une facture payée pour la rembourser plus tard (même après un redémarrage)
+// What to keep from a paid invoice to refund it later (even after a restart)
 export type PaidInvoice = Pick<Invoice, 'id' | 'amount' | 'lockingScriptHex'> & { settledTxid: string; rawtx: string; refundScriptHex: string }
 
-// Prix fixe, ou prix calculé à partir de la requête avec la description de la commande
+// Fixed price, or price computed from the request with the order description
 export type Pricing = number | ((req: Request) => { amount: number; order?: OrderInfo } | { error: string })
 
 export interface SellerOptions {
   secret: string
-  skipBroadcast?: boolean // pour tester sans réseau
+  skipBroadcast?: boolean // for testing without the network
   invoiceMinutes?: number
-  // Appelé quand une facture est payée (journal du vendeur, page "commandes récentes"…)
+  // Called when an invoice is paid (seller's log, "recent orders" page…)
   onPaid?: (inv: Invoice, txid: string, req: Request) => void
   log?: (msg: string) => void
 }
 
 export function createSeller(o: SellerOptions) {
   if (!o.secret) throw new Error('Seller secret missing')
-  const invoices = new Map<string, Invoice>()      // par lockingScriptHex
-  const locks = new Map<string, Promise<void>>()   // un paiement à la fois par facture
+  const invoices = new Map<string, Invoice>()      // by lockingScriptHex
+  const locks = new Map<string, Promise<void>>()   // one payment at a time per invoice
   const log = o.log ?? ((m: string) => console.log(m))
 
-  // La clé privée d'une facture (pour un remboursement, par exemple)
+  // The private key of an invoice (for a refund, for example)
   const invoiceKey = (id: string) => new PrivateKey(Hash.sha256(Utils.toArray(`${o.secret}:${id}`, 'utf8')))
 
   function createInvoice(resource: string, amount: number, order?: OrderInfo): Invoice {
@@ -61,7 +61,7 @@ export function createSeller(o: SellerOptions) {
       expiresAt: new Date(Date.now() + (o.invoiceMinutes ?? 15) * 60_000), order: order ? JSON.stringify(order) : undefined
     }
     invoices.set(lockingScriptHex, inv)
-    // Ménage : on oublie les factures expirées et jamais payées
+    // Housekeeping: forget expired invoices that were never paid
     if (invoices.size > 5000) for (const [k, v] of invoices) if (!v.settledTxid && v.expiresAt < new Date()) invoices.delete(k)
     return inv
   }
@@ -82,7 +82,7 @@ export function createSeller(o: SellerOptions) {
     res.status(status).set('PAYMENT-RESPONSE', encode(pr)).json({ error: reason, ...extra })
   }
 
-  // Middleware : protège une route avec un prix
+  // Middleware: protects a route with a price
   function requirePayment(pricing: Pricing, description: string) {
     return async (req: Request, res: Response, next: NextFunction) => {
       const resource = `${req.method} ${req.path}`
@@ -91,7 +91,7 @@ export function createSeller(o: SellerOptions) {
       if ('error' in priced) return void res.status(400).json({ error: priced.error })
       const { amount, order } = priced
 
-      // 1. Pas de paiement → 402 avec une facture neuve (et la description de la commande)
+      // 1. No payment → 402 with a new invoice (and the order description)
       if (!header) {
         const inv = createInvoice(resource, amount, order)
         const body: PaymentRequired = {
@@ -103,7 +103,7 @@ export function createSeller(o: SellerOptions) {
         return void res.status(402).set('PAYMENT-REQUIRED', encode(body)).json(body)
       }
 
-      // 2. Lire le paiement
+      // 2. Read the payment
       let p: PaymentPayload
       try { p = decode<PaymentPayload>(header) } catch { return fail(res, 400, 'malformed_payment') }
       const script = (p.payload?.lockingScriptHex ?? p.accepted?.extra?.lockingScriptHex ?? '').toLowerCase()
@@ -112,19 +112,19 @@ export function createSeller(o: SellerOptions) {
       const inv = invoices.get(script)
       if (!inv) return fail(res, 402, 'invoice_not_found')
       if (inv.resource !== resource) return fail(res, 402, 'resource_mismatch')
-      // On ne peut pas payer une commande puis en recevoir une autre (plus chère, autre adresse…)
+      // You cannot pay for one order and receive another (more expensive, other address…)
       if (inv.order !== (order ? JSON.stringify(order) : undefined)) return fail(res, 402, 'order_mismatch')
 
-      // Un seul traitement à la fois pour une même facture
+      // Only one processing at a time for the same invoice
       const previous = locks.get(inv.id) ?? Promise.resolve()
       let release!: () => void
       locks.set(inv.id, new Promise<void>(r => (release = r)))
       await previous
       try {
-        if (inv.settledTxid) return serve(inv.settledTxid, false) // déjà payé : on resert sans facturer
+        if (inv.settledTxid) return serve(inv.settledTxid, false) // already paid: serve again without charging
         if (inv.expiresAt < new Date()) return fail(res, 402, 'invoice_expired')
 
-        // 3. Vérifier le montant payé à l'adresse de la facture
+        // 3. Check the amount paid to the invoice address
         let tx: Transaction
         try { tx = Transaction.fromHex(p.payload.rawtx) } catch { return fail(res, 400, 'malformed_payment') }
         const paid = tx.outputs
@@ -132,7 +132,7 @@ export function createSeller(o: SellerOptions) {
           .reduce((s, out) => s + (out.satoshis ?? 0), 0)
         if (paid < inv.amount) return fail(res, 402, 'insufficient_funds', { required: inv.amount, paid })
 
-        // 4. Diffuser la transaction sur le réseau (c'est le vendeur qui diffuse)
+        // 4. Broadcast the transaction to the network (the seller broadcasts)
         const txid = tx.id('hex')
         if (!o.skipBroadcast) {
           const r = await tx.broadcast(new WhatsOnChainBroadcaster('test'))
@@ -140,13 +140,13 @@ export function createSeller(o: SellerOptions) {
           if (r.status !== 'success' && !known) return fail(res, 402, 'broadcast_rejected', { retryable: false, detail: r })
         }
 
-        // 5. Facture réglée → on sert la ressource. On garde de quoi rembourser.
+        // 5. Invoice settled → serve the resource. Keep what is needed to refund.
         inv.settledTxid = txid
         inv.rawtx = p.payload.rawtx
         try {
           const to = p.extensions?.refundTo
           inv.refundScriptHex = to ? new P2PKH().lock(to).toHex()
-            : tx.outputs.find(out => out.lockingScript.toHex().toLowerCase() !== script)?.lockingScript.toHex() // la monnaie du payeur
+            : tx.outputs.find(out => out.lockingScript.toHex().toLowerCase() !== script)?.lockingScript.toHex() // the payer's change
         } catch { inv.refundScriptHex = undefined }
         log(`Paid: ${inv.amount} sats for ${resource} — tx ${txid}`)
         serve(txid, true)
@@ -165,8 +165,8 @@ export function createSeller(o: SellerOptions) {
     }
   }
 
-  // Rembourse une facture payée : renvoie l'argent au payeur (moins les frais du réseau, et moins keepSats
-  // si le vendeur garde des frais d'annulation). Le résultat va dans l'en-tête PAYMENT-REFUND de la réponse.
+  // Refunds a paid invoice: sends the money back to the payer (minus network fees, and minus keepSats
+  // if the seller keeps a cancellation fee). The result goes in the PAYMENT-REFUND header of the response.
   async function refund(inv: PaidInvoice, keepSats = 0): Promise<RefundNotice> {
     const paidTx = Transaction.fromHex(inv.rawtx)
     const index = paidTx.outputs.findIndex(out => out.lockingScript.toHex().toLowerCase() === inv.lockingScriptHex)
@@ -190,7 +190,7 @@ export function createSeller(o: SellerOptions) {
   }
   const refundHeader = (n: RefundNotice) => encode(n)
 
-  // Données à garder pour un remboursement futur
+  // Data to keep for a future refund
   const paidRecord = (inv: Invoice): PaidInvoice | undefined => inv.settledTxid && inv.rawtx && inv.refundScriptHex
     ? { id: inv.id, amount: inv.amount, lockingScriptHex: inv.lockingScriptHex, settledTxid: inv.settledTxid, rawtx: inv.rawtx, refundScriptHex: inv.refundScriptHex }
     : undefined

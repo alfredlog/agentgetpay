@@ -1,11 +1,11 @@
-// Affiche l'adresse et le solde du portefeuille testnet.
+// Shows the address and balance of the testnet wallet.
 import 'dotenv/config'
 import { PrivateKey } from '@bsv/sdk'
 import { getUtxos } from './woc.js'
 
 const key = PrivateKey.fromWif(process.env.BSV_WIF!)
 const address = key.toAddress('testnet')
-console.log('Address:', address) // affichée d'abord : utile même si WhatsOnChain ne répond pas
+console.log('Address:', address) // printed first: useful even if WhatsOnChain does not answer
 const utxos = await getUtxos(address)
 const total = utxos.reduce((s, u) => s + u.value, 0)
 

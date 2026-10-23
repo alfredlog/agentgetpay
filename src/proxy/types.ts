@@ -1,5 +1,5 @@
-// Les interfaces du proxy. Le reste du code ne connaît QUE ces interfaces :
-// pour passer en version entreprise, on écrit une nouvelle classe, sans toucher au proxy.
+// The proxy's interfaces. The rest of the code ONLY knows these interfaces:
+// to move to the enterprise version, write a new class without touching the proxy.
 import type { Unlocker } from '../agent/pay-fetch.js'
 import type { OrderInfo } from '../shared/x402.js'
 
@@ -8,8 +8,8 @@ export interface PaymentRequest {
   url: string
   amountSats: number
   amountEur: number
-  purpose?: string // pourquoi l'agent paie (pour l'audit)
-  order?: OrderInfo // ce qui est acheté, si le marchand le décrit (catégorie, articles, livraison)
+  purpose?: string // why the agent pays (for the audit)
+  order?: OrderInfo // what is bought, if the merchant describes it (category, items, delivery)
 }
 
 export type Decision =
@@ -17,32 +17,32 @@ export type Decision =
   | { kind: 'deny'; reason: string }
   | { kind: 'needs_approval'; reason: string }
 
-// Décide AVANT la signature. Hackathon : règles JSON. Entreprise : Open Policy Agent.
+// Decides BEFORE signing. Hackathon: JSON rules. Enterprise: Open Policy Agent.
 export interface PolicyEngine {
   evaluate(req: PaymentRequest): Promise<Decision>
 }
 
-// Plafonds à respecter au moment de réserver (en sats)
+// Limits to respect when reserving (in sats)
 export interface BudgetLimits {
   daySats: number
   monthSats?: number
-  category?: string         // catégorie complète de l'achat, ex. "travel.hotel"
-  categoryKey?: string      // catégorie qui porte le plafond, ex. "travel"
+  category?: string         // full category of the purchase, e.g. "travel.hotel"
+  categoryKey?: string      // category carrying the limit, e.g. "travel"
   categoryMonthSats?: number
 }
 
-// Compte ce que chaque agent a dépensé (jour, mois, mois par catégorie). Hackathon : mémoire. Entreprise : Redis.
+// Counts what each agent spent (day, month, month per category). Hackathon: memory. Enterprise: Redis.
 export interface BudgetStore {
-  spentToday(agentId: string): Promise<number> // en sats
-  spentThisMonth(agentId: string, category?: string): Promise<number> // en sats
-  // Réserve le montant si AUCUN plafond n'est dépassé ; sinon renvoie la raison du refus
+  spentToday(agentId: string): Promise<number> // in sats
+  spentThisMonth(agentId: string, category?: string): Promise<number> // in sats
+  // Reserves the amount if NO limit is exceeded; otherwise returns the reason for refusing
   tryReserve(agentId: string, sats: number, limits: BudgetLimits): Promise<string | undefined>
   release(agentId: string, sats: number, category?: string): Promise<void>
-  reset(agentId: string): Promise<void> // remet le compteur du jour à zéro (administration)
+  reset(agentId: string): Promise<void> // resets the daily counter (administration)
   credit(agentId: string, sats: number, category: string | undefined, originalTs: string): void // remboursement
 }
 
-// Garde les clés et signe. Hackathon : variable d'environnement. Entreprise : HashiCorp Vault.
+// Holds the keys and signs. Hackathon: environment variable. Enterprise: HashiCorp Vault.
 export interface KeyStore {
   address(agentId: string): string
   unlocker(agentId: string): Unlocker
@@ -56,24 +56,24 @@ export interface LedgerEntry {
   amountSats: number
   amountEur: number
   purpose?: string
-  decision: Decision['kind'] | 'error' | 'admin' | 'refund' // 'admin' = modification des règles ; 'refund' = remboursement reçu
+  decision: Decision['kind'] | 'error' | 'admin' | 'refund' // 'admin' = rule change; 'refund' = refund received
   reason?: string
   txid?: string
-  order?: OrderInfo   // ce qui a été acheté (marchand, catégorie, articles, livraison)
-  approvedBy?: string // qui a validé (Vier-Augen-Prinzip)
-  action?: string     // pour les entrées 'admin' : type de modification (ex. 'budget_reset')
-  requestId?: string  // demande de validation liée (R-…)
-  mandateId?: string  // paiement couvert par un mandat (M-…)
-  refundOf?: string   // pour un remboursement : la transaction du paiement remboursé
+  order?: OrderInfo   // what was bought (merchant, category, items, delivery)
+  approvedBy?: string // who approved (four-eyes principle, Vier-Augen-Prinzip)
+  action?: string     // for 'admin' entries: type of change (e.g. 'budget_reset')
+  requestId?: string  // related approval request (R-…)
+  mandateId?: string  // payment covered by a mandate (M-…)
+  refundOf?: string   // for a refund: the transaction of the refunded payment
   prevHash: string
   hash: string
 }
 
-// Journal d'audit. Hackathon : fichier JSONL chaîné. Entreprise : Postgres + ancrage sur BSV.
+// Audit log. Hackathon: hash-chained JSONL file. Enterprise: Postgres + anchoring on BSV.
 export interface Ledger {
   record(e: Omit<LedgerEntry, 'seq' | 'ts' | 'prevHash' | 'hash'>): Promise<LedgerEntry>
   all(): Promise<LedgerEntry[]>
   verify(): Promise<{ ok: boolean; brokenAt?: number }>
 }
 
-// Demande l'accord d'un humain : voir approval.ts (ApprovalNotifier) et requests.ts (demandes enregistrées).
+// Asks a human for approval: see approval.ts (ApprovalNotifier) and requests.ts (stored requests).

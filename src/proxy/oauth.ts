@@ -1,15 +1,15 @@
-// Connexion OAuth 2.1 pour les assistants IA (Claude, ChatGPT, Cursor…) qui se branchent sur le serveur MCP distant.
+// OAuth 2.1 sign-in for AI assistants (Claude, ChatGPT, Cursor…) that connect to the remote MCP server.
 //
-// Le parcours, vu par l'employé :
-//   1. Dans son assistant, il ajoute le connecteur https://agentpay.example.com/mcp et clique sur « Connecter ».
-//   2. L'assistant l'envoie sur la page AgentGetPay /authorize. Il y tape le CODE DE CONNEXION que l'administrateur
-//      a créé pour son agent (usage unique, valable 15 minutes). L'administrateur peut aussi se connecter lui-même
-//      avec le mot de passe admin et le nom de l'agent.
-//   3. L'assistant reçoit un jeton lié à CET agent : il dépense dans le budget et sous les règles de cet agent.
+// The flow, as the employee sees it:
+//   1. In their assistant, they add the connector https://agentpay.example.com/mcp and click "Connect".
+//   2. The assistant sends them to the AgentGetPay /authorize page. They type the CONNECTION CODE the administrator
+//      created for their agent (single use, valid 15 minutes). The administrator can also connect directly
+//      with the admin password and the agent name.
+//   3. The assistant receives a token bound to THAT agent: it spends within that agent's budget and rules.
 //
-// Ce qui est respecté : découverte (RFC 9728 + RFC 8414), enregistrement dynamique des clients (RFC 7591),
-// PKCE S256 obligatoire, jetons d'accès courts (1 h), jetons de rafraîchissement à usage unique (rotation).
-// Rien n'est stocké en clair : seuls les hash des codes et des jetons sont gardés.
+// Standards followed: discovery (RFC 9728 + RFC 8414), dynamic client registration (RFC 7591),
+// mandatory PKCE S256, short access tokens (1 h), single-use refresh tokens (rotation).
+// Nothing is stored in clear: only hashes of codes and tokens are kept.
 import express from 'express'
 import { createHash, randomBytes, randomInt } from 'node:crypto'
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs'
@@ -40,12 +40,12 @@ interface Pairing { agentId: string; exp: number; by: string }
 interface Pending { clientId: string; redirectUri: string; codeChallenge: string; state?: string; exp: number }
 interface Code { agentId: string; clientId: string; redirectUri: string; codeChallenge: string; by: string; exp: number }
 
-// Une adresse de retour acceptable : https, ou http sur cet ordinateur (assistants installés localement)
+// An acceptable return address: https, or http on this computer (locally installed assistants)
 const isLoopback = (u: URL) => u.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname)
 function validRedirect(uri: unknown): boolean {
   try { const u = new URL(String(uri)); return !u.hash && (u.protocol === 'https:' || isLoopback(u)) } catch { return false }
 }
-// Comparaison exacte ; pour une adresse locale, le port peut changer à chaque session (RFC 8252)
+// Exact comparison; for a local address the port may change on every session (RFC 8252)
 function sameRedirect(registered: string, given: string): boolean {
   if (registered === given) return true
   try {
@@ -55,9 +55,9 @@ function sameRedirect(registered: string, given: string): boolean {
 }
 
 export interface OAuthOptions {
-  issuer: string            // ex. https://agentpay.pdf-libre.de
-  resource: string          // l'adresse du serveur MCP, ex. https://agentpay.pdf-libre.de/mcp
-  path?: string             // fichier de sauvegarde
+  issuer: string            // e.g. https://agentpay.pdf-libre.de
+  resource: string          // the MCP server address, e.g. https://agentpay.pdf-libre.de/mcp
+  path?: string             // storage file
   agentExists: (id: string) => boolean
   agentActive: (id: string) => boolean
   checkAdminPassword: (password: string) => boolean
@@ -66,10 +66,10 @@ export interface OAuthOptions {
 
 export class OAuthServer {
   private s: State
-  private pairings = new Map<string, Pairing>() // clé : hash du code de connexion
-  private pending = new Map<string, Pending>()  // demandes de connexion affichées à l'écran
+  private pairings = new Map<string, Pairing>() // key: hash of the connection code
+  private pending = new Map<string, Pending>()  // sign-in requests shown on screen
   private codes = new Map<string, Code>()       // codes d'autorisation (hash)
-  private failures = new Map<string, { n: number; reset: number }>() // essais ratés par adresse IP
+  private failures = new Map<string, { n: number; reset: number }>() // failed attempts per IP address
   private path: string
 
   constructor(private o: OAuthOptions) {
@@ -92,9 +92,9 @@ export class OAuthServer {
       for (const [k, v] of m) if (v.exp < now) m.delete(k)
   }
 
-  // ---- Utilisé par le proxy ----
+  // ---- Used by the proxy ----
 
-  // Jeton d'accès → agent (ou undefined)
+  // Access token → agent (or undefined)
   authenticate(authHeader: string | undefined): string | undefined {
     const t = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : ''
     if (!t.startsWith('agoa_')) return undefined
@@ -103,15 +103,15 @@ export class OAuthServer {
     if (!a || a.exp < Date.now()) return undefined
     const g = this.s.grants.find(x => x.id === a.grantId)
     if (!g) return undefined
-    // Date de dernière utilisation : sauvegardée au plus une fois par minute
+    // Last-used date: saved at most once a minute
     if (Date.now() - Date.parse(g.lastUsedAt) > 60_000) { g.lastUsedAt = new Date().toISOString(); this.save() }
     return g.agentId
   }
 
-  // Code de connexion pour un agent, créé par l'administrateur (affiché une seule fois)
+  // Connection code for an agent, created by the administrator (shown only once)
   createPairing(agentId: string, by: string) {
     this.sweep()
-    const alphabet = '23456789ABCDEFGHJKMNPQRSTUVWXYZ' // sans 0/O, 1/I/L : lisible à l'oral
+    const alphabet = '23456789ABCDEFGHJKMNPQRSTUVWXYZ' // no 0/O, 1/I/L: easy to read out loud
     const raw = Array.from({ length: 8 }, () => alphabet[randomInt(alphabet.length)]).join('')
     const exp = Date.now() + PAIRING_TTL
     this.pairings.set(sha256(raw), { agentId, exp, by })
@@ -131,14 +131,14 @@ export class OAuthServer {
     return g
   }
 
-  // ---- Les adresses web OAuth ----
+  // ---- The OAuth web endpoints ----
 
   router() {
     const r = express.Router()
     const { issuer, resource } = this.o
     const form = express.urlencoded({ extended: false, limit: '20kb' })
 
-    // Les assistants qui tournent dans un navigateur lisent ces adresses depuis une autre origine
+    // Assistants running in a browser read these addresses from another origin
     const cors: express.RequestHandler = (req, res, next) => {
       res.set('Access-Control-Allow-Origin', '*')
       res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type, MCP-Protocol-Version')
@@ -165,7 +165,7 @@ export class OAuthServer {
     r.use(['/.well-known/oauth-authorization-server', '/.well-known/openid-configuration'], cors)
     r.get(['/.well-known/oauth-authorization-server', '/.well-known/oauth-authorization-server/mcp', '/.well-known/openid-configuration'], (_req, res) => res.json(asMeta))
 
-    // Enregistrement dynamique : l'assistant se présente (nom + adresse de retour) et reçoit un identifiant
+    // Dynamic registration: the assistant introduces itself (name + return address) and gets an id
     r.use('/register', cors)
     r.post('/register', express.json({ limit: '20kb' }), (req, res) => {
       const uris = req.body?.redirect_uris
@@ -179,7 +179,7 @@ export class OAuthServer {
         created_at: new Date().toISOString()
       }
       this.s.clients.push(client)
-      // Limite contre les enregistrements en masse : on oublie les plus anciens clients sans connexion
+      // Limit against mass registration: forget the oldest clients without a connection
       if (this.s.clients.length > MAX_CLIENTS) {
         const used = new Set(this.s.grants.map(g => g.clientId))
         const idx = this.s.clients.findIndex(c => !used.has(c.client_id))
@@ -192,14 +192,14 @@ export class OAuthServer {
       })
     })
 
-    // Page de connexion : jamais affichée dans un cadre d'un autre site (protection contre le « clickjacking »)
+    // Sign-in page: never shown inside another site's frame (protection against clickjacking)
     r.use('/authorize', (_req, res, next) => { res.set('X-Frame-Options', 'DENY').set('Content-Security-Policy', "frame-ancestors 'none'").set('Cache-Control', 'no-store'); next() })
     r.get('/authorize', (req, res) => {
       this.sweep()
       const q = req.query as Record<string, string | undefined>
       const client = this.s.clients.find(c => c.client_id === q.client_id)
       const redirect = client && q.redirect_uri && client.redirect_uris.some(u => sameRedirect(u, q.redirect_uri!)) ? q.redirect_uri : undefined
-      // Client ou adresse de retour inconnus : on ne redirige JAMAIS vers une adresse non vérifiée
+      // Unknown client or return address: NEVER redirect to an unverified address
       if (!client || !redirect) return res.status(400).send(page('Connection refused', `<p>This assistant is not registered, or its return address does not match. Remove the connector and add it again.</p>`))
       const fail = (error: string, description: string) => res.redirect(withParams(redirect, { error, error_description: description, state: q.state, iss: issuer }))
       if (q.response_type !== 'code') return fail('unsupported_response_type', 'Only response_type=code is supported')
@@ -219,7 +219,7 @@ export class OAuthServer {
       const back = (params: Record<string, string | undefined>) => { this.pending.delete(String(b.request_id)); res.redirect(withParams(p.redirectUri, { ...params, state: p.state, iss: issuer })) }
       if (b.action === 'cancel') return back({ error: 'access_denied', error_description: 'The user cancelled the connection' })
 
-      // Limite d'essais : 10 échecs par adresse IP et par quart d'heure
+      // Attempt limit: 10 failures per IP address per quarter hour
       const ip = req.ip ?? 'unknown'
       const f = this.failures.get(ip)
       if (f && f.reset > Date.now() && f.n >= 10) return res.status(429).send(page('Too many attempts', '<p>Too many wrong codes. Wait 15 minutes and try again.</p>'))
@@ -251,7 +251,7 @@ export class OAuthServer {
       back({ code })
     })
 
-    // Échange du code contre des jetons, et renouvellement
+    // Code exchange for tokens, and renewal
     r.use('/token', cors)
     r.post('/token', form, express.json({ limit: '20kb' }), async (req, res) => {
       res.set('Cache-Control', 'no-store')
@@ -262,7 +262,7 @@ export class OAuthServer {
         this.sweep()
         const key = sha256(String(b.code ?? ''))
         const c = this.codes.get(key)
-        this.codes.delete(key) // usage unique, même en cas d'erreur
+        this.codes.delete(key) // single use, even on error
         if (!c || c.exp < Date.now()) return err('invalid_grant', 'Unknown or expired authorization code')
         if (c.clientId !== b.client_id) return err('invalid_grant', 'This code was issued to another client')
         if (b.redirect_uri && !sameRedirect(c.redirectUri, String(b.redirect_uri))) return err('invalid_grant', 'redirect_uri does not match')
@@ -285,7 +285,7 @@ export class OAuthServer {
         if (!g || g.refreshExp < Date.now()) return err('invalid_grant', 'Unknown, expired or revoked refresh token')
         if (b.client_id && b.client_id !== g.clientId) return err('invalid_grant', 'This token was issued to another client')
         if (!this.o.agentExists(g.agentId)) return err('invalid_grant', 'The agent no longer exists')
-        const refresh = token('agor') // rotation : l'ancien jeton ne marche plus
+        const refresh = token('agor') // rotation: the old token no longer works
         g.refreshHash = sha256(refresh)
         g.refreshExp = Date.now() + REFRESH_TTL * 1000
         return res.json({ access_token: this.issueAccess(g.id), token_type: 'Bearer', expires_in: ACCESS_TTL, refresh_token: refresh, scope: 'agent' })
@@ -311,7 +311,7 @@ function withParams(base: string, params: Record<string, string | undefined>) {
   return u.toString()
 }
 
-// ---- Pages HTML (sans JavaScript, sans ressource externe) ----
+// ---- HTML pages (no JavaScript, no external resource) ----
 
 function page(title: string, body: string) {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
