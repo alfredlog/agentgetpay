@@ -1,12 +1,12 @@
-// Test hors ligne : simule un portefeuille approvisionné et un vendeur qui ne diffuse pas.
-// Lance d'abord le vendeur avec SKIP_BROADCAST=1.
+// Offline test: simulates a funded wallet and a seller that does not broadcast.
+// Start the seller first with SKIP_BROADCAST=1.
 import { PrivateKey, Transaction, P2PKH } from '@bsv/sdk'
 import { payFetch } from '../agent/pay-fetch.js'
 import { UtxoProvider } from '../shared/utxo.js'
 
 const key = PrivateKey.fromRandom()
 
-// Une fausse transaction qui "donne" 5000 sats à l'agent
+// A fake transaction that "gives" 5000 sats to the agent
 const funding = new Transaction()
 funding.addOutput({ lockingScript: new P2PKH().lock(key.toAddress('testnet')), satoshis: 5000 })
 const fakeUtxos: UtxoProvider = {
@@ -18,7 +18,7 @@ const { response, paid } = await payFetch(url, { method: 'GET' }, { address: key
 console.log('Status:', response.status, '| Paid:', paid)
 console.log('Response:', await response.json())
 
-// Le garde-fou doit bloquer un prix trop élevé
+// The safeguard must block a price that is too high
 try {
   await payFetch(url, { method: 'GET' }, { address: key.toAddress('testnet'), unlocker: () => new P2PKH().unlock(key), utxos: fakeUtxos, maxSats: 5 })
   console.log('ERROR: the guard should have blocked')

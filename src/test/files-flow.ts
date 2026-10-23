@@ -1,5 +1,5 @@
-// Test des fichiers en mode connecteur : lien de dépôt, envoi au service, lien de téléchargement,
-// et isolation entre agents. Dossier temporaire, faux service gratuit : aucun paiement, rien n'est touché chez toi.
+// Test of files in connector mode: upload link, sending to the service, download link,
+// and isolation between agents. Temporary folder, fake free service: no payment, nothing on your machine is touched.
 import { mkdtempSync, cpSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -17,7 +17,7 @@ const dir = mkdtempSync(join(tmpdir(), 'agentgetpay-files-'))
 cpSync(join(root, 'config'), join(dir, 'config'), { recursive: true })
 writeFileSync(join(dir, '.env'), `BSV_WIF=${PrivateKey.fromRandom().toWif()}\nADMIN_TOKEN=test-admin-password-123\n`)
 
-// Faux service "PDF" gratuit : renvoie le fichier reçu, comme un outil de compression
+// Fake free "PDF" service: returns the file it receives, like a compression tool
 const service = http.createServer((req, res) => {
   let b = ''; req.on('data', d => b += d); req.on('end', () => {
     const body = JSON.parse(b || '{}')
@@ -53,13 +53,13 @@ try {
   const tools = (await docs.listTools()).tools.map(t => t.name)
   check(tools.includes('request_file_upload') && tools.includes('get_download_link'), 'Connector mode offers upload and download tools')
 
-  // 1. Lien de dépôt
+  // 1. Upload link
   const up = url(text(await docs.callTool({ name: 'request_file_upload', arguments: {} })))
   check(up.startsWith(`http://127.0.0.1:${MCP_PORT}/files/u/`), 'Upload link created')
   const pageHtml = await fetch(up).then(r => r.text())
   check(/Send files to your assistant/.test(pageHtml) && /docs-01/.test(pageHtml), 'Upload page opens and names the agent')
 
-  // 2. L'utilisateur dépose un PDF (assez gros pour être renvoyé comme fichier)
+  // 2. The user uploads a PDF (large enough to be returned as a file)
   const pdf = Buffer.concat([Buffer.from('%PDF-1.4\n'), Buffer.alloc(5000, 65)])
   const sent = await fetch(`${up}?name=${encodeURIComponent('../../Facture März.pdf')}`, { method: 'POST', body: pdf }).then(r => r.json())
   check(sent.file === 'in/Facture-Marz.pdf', `File stored with a safe name (${sent.file})`)
@@ -69,14 +69,14 @@ try {
   check(big.status === 413, 'Files above the size limit are refused')
   check(/in\/Facture-Marz\.pdf/.test(text(await docs.callTool({ name: 'list_workspace_files', arguments: {} }))), 'The assistant sees the uploaded file')
 
-  // 3. Envoi au service, puis lien de téléchargement du résultat
+  // 3. Send to the service, then download link of the result
   const r = await docs.callTool({ name: 'pay_and_fetch', arguments: { url: `http://localhost:${SERVICE_PORT}/compress`, method: 'POST', body: { pdf: { $file: 'in/Facture-Marz.pdf' } }, purpose: 'Compress the invoice for the archive' } })
   const dl = text(r).match(/out\/compressed\.pdf: (\S+)/)?.[1] ?? ''
   check(!!dl, 'Result comes with a download link')
   const got = Buffer.from((await (await fetch(dl)).arrayBuffer()) as ArrayBuffer)
   check(got.equals(pdf), 'Download link returns the produced file')
 
-  // 4. Un autre agent ne voit rien et ne peut pas sortir de son dossier
+  // 4. Another agent sees nothing and cannot leave its folder
   const other = await connect('dev-recherche-01')
   check(!/Facture/.test(text(await other.callTool({ name: 'list_workspace_files', arguments: {} }))), 'Another agent does not see these files')
   const escape = await other.callTool({ name: 'get_download_link', arguments: { file: '../docs-01/in/Facture-Marz.pdf' } }) as any

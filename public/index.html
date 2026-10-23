@@ -136,15 +136,15 @@ const when = ts => {
     : d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) + ', ' + d.toLocaleTimeString()
 }
 const label = { allow: 'Paid', deny: 'Blocked', needs_approval: 'Needs approval', error: 'Error', admin: 'Rule change', refund: 'Refunded' }
-// "il y a 3 h", "dans 2 j"
+// "3 h ago", "in 2 days"
 const ago = ts => { const m = Math.max(0, Math.round((Date.now() - Date.parse(ts)) / 60000)); return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : m < 2880 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} days ago` }
 const inTime = ts => { const m = Math.max(0, Math.round((Date.parse(ts) - Date.now()) / 60000)); return m < 60 ? `${m} min` : m < 2880 ? `${Math.round(m / 60)} h` : `${Math.round(m / 1440)} days` }
 let seen = 0
-// Une adresse refusée peut être invalide ("hello", "file://…") : ne jamais faire planter l'affichage
+// A refused address may be invalid ("hello", "file://…"): never let it break the page
 const service = url => { try { const u = new URL(url); return u.host + u.pathname } catch { return String(url).slice(0, 60) } }
 const pathOf = url => { try { return new URL(url).pathname } catch { return String(url).slice(0, 60) } }
 
-// Si le proxy est ouvert au réseau, il faut le mot de passe admin (saisi sur la page d'administration)
+// If the proxy is open to the network, the admin password is required (entered on the admin page)
 const adminToken = () => { try { return sessionStorage.getItem('agp-token') || '' } catch { return '' } }
 async function api(url, opts = {}) {
   const res = await fetch(url, { ...opts, headers: { ...(opts.headers || {}), 'X-Admin-Token': adminToken() } })
@@ -152,9 +152,9 @@ async function api(url, opts = {}) {
   return res
 }
 
-// Téléchargements avec le mot de passe (un simple lien ne peut pas l'envoyer)
+// Downloads with the password (a plain link cannot send it)
 async function download(url, fallbackName, open) {
-  const win = open ? window.open('', '_blank') : null // ouvert tout de suite, sinon Safari bloque la fenêtre
+  const win = open ? window.open('', '_blank') : null // opened right away, otherwise Safari blocks the window
   try {
     const res = await api(url)
     const blob = await res.blob()
@@ -171,7 +171,7 @@ document.getElementById('btn-datev').onclick = () => download('/v1/export/datev'
 document.getElementById('btn-statement').onclick = () => download('/v1/export/statement', 'statement.html', true)
 
 let role = 'public'
-// Tableau de bord privé : on demande un code d'accès (créé par l'administrateur) ou le mot de passe admin
+// Private dashboard: ask for an access code (created by the administrator) or the admin password
 const $ = id => document.getElementById(id)
 const setToken = t => { try { t ? sessionStorage.setItem('agp-token', t) : sessionStorage.removeItem('agp-token') } catch {} }
 function showLocked(msg = '') {
@@ -185,7 +185,7 @@ async function openSession() {
   $('gate').classList.add('hidden'); $('content').classList.remove('hidden'); $('chain').classList.remove('hidden')
   const viewer = s.role === 'viewer'
   role = s.role
-  // Une personne autorisée consulte seulement : pas d'administration, pas d'ancrage (qui dépense des satoshis)
+  // An authorised person can only view: no administration, no anchoring (which spends satoshis)
   $('manage').classList.toggle('hidden', viewer)
   $('anchor-btn').classList.toggle('hidden', viewer)
   $('who').innerHTML = viewer ? `Viewing as <b>${esc(s.name)}</b> · <a href="#" id="signout">sign out</a>`
@@ -235,7 +235,7 @@ async function refresh() {
       <td class="muted"><code>${a.hash.slice(0, 16)}…</code></td>
       <td><a href="https://test.whatsonchain.com/tx/${a.txid}" target="_blank">${a.txid.slice(0, 10)}…</a></td></tr>`).join('')
 
-    // Validation possible ici aussi (administrateur, ou proxy local) : utile si Telegram ne répond pas
+    // Approval is possible here too (administrator, or local proxy): useful if Telegram does not answer
     const canDecide = role === 'admin' || role === 'local'
     const pend = document.getElementById('pending')
     const shown = stats.pending.map(p => p.id).join(',')

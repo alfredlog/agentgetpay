@@ -1,22 +1,22 @@
-// Registre des agents : identité, clé d'API, statut et règles de dépense.
-// Modifiable pendant que le proxy tourne (page d'administration), sauvegardé dans config/.
-// Version entreprise : une base de données (Postgres) avec historique des versions.
+// Agent registry: identity, API key, status and spending rules.
+// Editable while the proxy runs (admin page), saved in config/.
+// Enterprise version: a database (Postgres) with version history.
 import { readFileSync, writeFileSync, renameSync } from 'node:fs'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import type { Rules } from './policy.js'
 
 export interface AgentRecord {
   id: string
-  apiKey?: string   // clés de développement en clair (dev-…), pratiques pour la démo
-  keyHash?: string  // clés créées par l'administration : seul le hash est stocké
-  keyHint?: string  // les 4 derniers caractères, pour reconnaître la clé
+  apiKey?: string   // development keys in clear (dev-…), handy for the demo
+  keyHash?: string  // keys issued on the admin page: only the hash is stored
+  keyHint?: string  // the last 4 characters, to recognise the key
   active?: boolean  // false = agent suspendu
 }
 
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex')
 const sameText = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b))
 
-// Écriture "atomique" : on écrit un fichier temporaire puis on le renomme (pas de fichier à moitié écrit)
+// "Atomic" write: write a temporary file, then rename it (never a half-written file)
 const save = (path: string, data: unknown) => {
   writeFileSync(`${path}.tmp`, JSON.stringify(data, null, 2) + '\n')
   renameSync(`${path}.tmp`, path)
@@ -36,7 +36,7 @@ export class AgentRegistry {
   rulesFor(id: string): Rules | undefined { return this.rules[id] }
   isActive(id: string) { return this.get(id)?.active !== false }
 
-  // Retrouve l'agent à partir de sa clé d'API (en-tête "Authorization: Bearer …")
+  // Finds the agent from its API key ("Authorization: Bearer …" header)
   authenticate(authHeader: string | undefined): AgentRecord | undefined {
     const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined
     if (!token) return undefined
@@ -55,7 +55,7 @@ export class AgentRegistry {
     save(this.agentsPath, this.agents)
   }
 
-  // Nouvelle clé : renvoyée UNE seule fois, seul son hash est gardé
+  // New key: returned ONLY once, only its hash is kept
   rotateKey(id: string): string {
     const a = this.get(id)!
     const key = `agp_${randomBytes(24).toString('base64url')}`
@@ -74,7 +74,7 @@ export class AgentRegistry {
   }
 }
 
-// Vérifie les règles envoyées par la page d'administration
+// Checks the rules sent by the admin page
 export function validateRules(input: any): Rules {
   const num = (v: unknown, name: string, min: number) => {
     const n = Number(v)
@@ -101,7 +101,7 @@ export function validateRules(input: any): Rules {
     rules.monthly_budget_eur = monthly
   }
 
-  // Catégories d'achat : { "travel.hotel": { max_unit_price_eur, monthly_budget_eur, approval_above_eur } }
+  // Purchase categories: { "travel.hotel": { max_unit_price_eur, monthly_budget_eur, approval_above_eur } }
   if (input?.categories && typeof input.categories === 'object' && Object.keys(input.categories).length) {
     const cats: NonNullable<Rules['categories']> = {}
     for (const [key, c] of Object.entries<any>(input.categories)) {
@@ -118,7 +118,7 @@ export function validateRules(input: any): Rules {
     rules.categories = cats
   }
 
-  // Adresses de livraison autorisées
+  // Allowed delivery addresses
   if (Array.isArray(input?.shipping_addresses) && input.shipping_addresses.length) {
     if (input.shipping_addresses.length > 10) throw new Error('Too many delivery addresses (10 maximum)')
     rules.shipping_addresses = input.shipping_addresses.map((a: any, i: number) => {

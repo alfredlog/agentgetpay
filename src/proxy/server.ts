@@ -1,5 +1,5 @@
-// Le PAYMENT PROXY : les agents passent par ici, ils n'ont jamais la clé.
-// Pour chaque 402 : règles → réservation du budget → signature → paiement → journal.
+// The PAYMENT PROXY: agents go through here, they never hold the key.
+// For each 402: rules → budget reservation → signature → payment → audit log.
 import 'dotenv/config'
 import express from 'express'
 import { appendFileSync } from 'node:fs'
@@ -22,30 +22,30 @@ import { OAuthServer } from './oauth.js'
 import type { Broadcaster } from '@bsv/sdk'
 
 
-// Testnet : les coins n'ont pas de valeur, on fixe un taux fictif pour des montants lisibles.
-// Mainnet : ce taux viendra d'une API de cours en temps réel.
+// Testnet: coins have no value, so we use a fictional rate to get readable amounts.
+// Mainnet: this rate will come from a live price API.
 const EUR_PER_SAT = Number(process.env.EUR_PER_SAT ?? 0.01)
 const PORT = Number(process.env.PROXY_PORT ?? 5050)
-// Par défaut, le proxy n'écoute que sur cet ordinateur (127.0.0.1) : personne d'autre sur le réseau ne le voit.
-// PROXY_HOST=0.0.0.0 l'ouvre au réseau ; il faut alors le mot de passe admin partout, et les clés de démo sont refusées.
+// By default the proxy only listens on this computer (127.0.0.1): nobody else on the network can see it.
+// PROXY_HOST=0.0.0.0 opens it to the network; the admin password is then required everywhere and demo keys are refused.
 const HOST = process.env.PROXY_HOST ?? '127.0.0.1'
 const truthy = (v: string | undefined) => ['1', 'true', 'yes', 'on'].includes(String(v ?? '').trim().toLowerCase())
-// Derrière un serveur web (Caddy, nginx), le proxy écoute sur 127.0.0.1 mais il est PUBLIC : PROXY_PUBLIC=true le dit.
+// Behind a web server (Caddy, nginx), the proxy listens on 127.0.0.1 but is PUBLIC: PROXY_PUBLIC=true says so.
 const EXPOSED = !['127.0.0.1', 'localhost', '::1'].includes(HOST) || truthy(process.env.PROXY_PUBLIC)
-// Adresse publique du proxy (ex. agentpay.pdf-libre.de) : un agent ne doit jamais pouvoir l'appeler
+// Public address of the proxy (e.g. agentpay.pdf-libre.de): an agent must never be able to call it
 const PUBLIC_HOST = (process.env.PROXY_PUBLIC_HOST ?? '').trim().toLowerCase()
-// Démo publique : le tableau de bord se consulte sans mot de passe (exports, ancrage et administration restent protégés)
+// Public demo: the dashboard can be viewed without a password (exports, anchoring and administration stay protected)
 const PUBLIC_READ = truthy(process.env.DASHBOARD_PUBLIC_READ)
-// Connexion OAuth des assistants IA : adresse publique de ce serveur et du serveur MCP
+// OAuth sign-in for AI assistants: public address of this server and of the MCP server
 const ISSUER = (process.env.OAUTH_ISSUER ?? (PUBLIC_HOST ? `https://${PUBLIC_HOST}` : `http://127.0.0.1:${PORT}`)).replace(/\/$/, '')
 const MCP_URL = (process.env.MCP_PUBLIC_URL ?? (PUBLIC_HOST ? `${ISSUER}/mcp` : `http://127.0.0.1:${process.env.MCP_PORT ?? 5070}/mcp`)).replace(/\/$/, '')
 
 const registry = new AgentRegistry()
-const viewers = new ViewerStore() // personnes autorisées à consulter le tableau de bord
+const viewers = new ViewerStore() // people allowed to view the dashboard
 const budget = new MemoryBudgetStore()
 const policy = new JsonPolicyEngine(registry, budget, EUR_PER_SAT)
 
-// Mot de passe de la page d'administration : créé automatiquement au premier démarrage
+// Admin page password: created automatically on first start
 let ADMIN_TOKEN = process.env.ADMIN_TOKEN ?? ''
 if (ADMIN_TOKEN.length < 12) {
   ADMIN_TOKEN = randomBytes(18).toString('base64url')
@@ -54,12 +54,12 @@ if (ADMIN_TOKEN.length < 12) {
 }
 const keys = new EnvKeyStore(process.env.BSV_WIF!)
 const ledger = new JsonlLedger('data/ledger.jsonl')
-budget.restoreFrom(ledger.allSync()) // les dépenses du jour survivent à un redémarrage
+budget.restoreFrom(ledger.allSync()) // today's spending survives a restart
 const anchorLog = new AnchorLog('data/anchors.jsonl')
-const ANCHOR_EVERY = Number(process.env.ANCHOR_EVERY ?? 5) // ancrer sur BSV toutes les N entrées du journal
+const ANCHOR_EVERY = Number(process.env.ANCHOR_EVERY ?? 5) // anchor on BSV every N audit log entries
 
-// Validation humaine : Telegram si configuré ; on peut TOUJOURS aussi décider sur le tableau de bord.
-// APPROVAL_AUTO=approved|rejected : réponse automatique (tests). Une demande reste ouverte APPROVAL_TTL_HOURS heures.
+// Human approval: Telegram if configured; decisions can ALWAYS be made on the dashboard too.
+// APPROVAL_AUTO=approved|rejected: automatic answer (tests). A request stays open APPROVAL_TTL_HOURS hours.
 const notifier: ApprovalNotifier = process.env.APPROVAL_AUTO
   ? new AutoNotifier(process.env.APPROVAL_AUTO === 'approved' ? 'approved' : 'rejected', Number(process.env.APPROVAL_AUTO_DELAY_MS ?? 0))
   : process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID
@@ -69,7 +69,7 @@ const APPROVAL_TTL_HOURS = Number(process.env.APPROVAL_TTL_HOURS ?? 72)
 const requests = new RequestStore()
 const mandates = new MandateStore()
 
-// Mot de passe administrateur (comparaison en temps constant)
+// Admin password (constant-time comparison)
 const isAdmin = (req: express.Request) => {
   const given = Buffer.from(String(req.get('X-Admin-Token') ?? ''))
   const expected = Buffer.from(ADMIN_TOKEN)
@@ -83,20 +83,20 @@ function requireAdmin(req: express.Request, res: express.Response, next: express
   if (!isAdmin(req)) return res.status(401).json({ error: 'Wrong admin password' })
   next()
 }
-// Lecture du tableau de bord : l'administrateur, ou une personne qui a reçu un code d'accès (agv_…)
+// Dashboard read access: the administrator, or a person who received an access code (agv_…)
 function requireReader(req: express.Request, res: express.Response, next: express.NextFunction) {
   if (isAdmin(req) || viewers.authenticate(String(req.get('X-Admin-Token') ?? ''))) return next()
   res.status(401).json({ error: 'Access code required' })
 }
 
-// Vérifie l'adresse demandée par un agent. Renvoie la raison du refus, ou undefined si c'est autorisé.
+// Checks the address requested by an agent. Returns the reason for refusing, or undefined if allowed.
 function checkTarget(url: unknown, allowed: string[] | undefined): string | undefined {
   let u: URL
   try { u = new URL(String(url)) } catch { return 'Invalid URL' }
   if (u.protocol !== 'http:' && u.protocol !== 'https:') return `Protocol not allowed: ${u.protocol}`
   if (!allowed) return 'No rules for this agent'
   if (!allowed.includes(u.hostname)) return `Domain not allowed: ${u.hostname}`
-  // Le proxy lui-même (son journal, son administration) n'est jamais une cible pour un agent
+  // The proxy itself (its log, its administration) is never a target for an agent
   const self = ['localhost', '127.0.0.1', '[::1]', '0.0.0.0'].includes(u.hostname) && Number(u.port || (u.protocol === 'https:' ? 443 : 80)) === PORT
   if (self || (PUBLIC_HOST && u.hostname === PUBLIC_HOST)) return 'The payment proxy itself cannot be called by an agent'
   return undefined
@@ -107,11 +107,11 @@ export function createProxy(
   opts: { broadcaster?: Broadcaster; fetchTxHex?: FetchTxHex } = {}
 ) {
   const utxos = new ChainedUtxoProvider(inner)
-  const walletLock = new Mutex() // paiements et ancrages dépensent le même portefeuille, un à la fois
+  const walletLock = new Mutex() // payments and anchors spend the same wallet, one at a time
   const rail = new BsvAnchorRail(keys.address('company'), () => keys.unlocker('company'), utxos, walletLock, opts.broadcaster)
   const fetchTxHex = opts.fetchTxHex ?? cachedWocFetch
 
-  // ---- Ancrage : publie le hash de la dernière entrée sur BSV ----
+  // ---- Anchoring: publishes the hash of the latest entry on BSV ----
   const anchorLock = new Mutex()
   const anchorNow = () => anchorLock.run(async (): Promise<Anchor | undefined> => {
     const last = (await ledger.all()).at(-1)
@@ -123,7 +123,7 @@ export function createProxy(
     console.log(`⚓ Audit log anchored on BSV up to entry #${a.seq} — https://test.whatsonchain.com/tx/${txid}`)
     return a
   })
-  let anchorInProgress = false // évite de lancer un 2e ancrage pendant qu'un ancrage est déjà en cours
+  let anchorInProgress = false // avoids starting a 2nd anchor while one is already running
   const maybeAnchor = async () => {
     if (anchorInProgress) return
     const lastSeq = (await ledger.all()).at(-1)?.seq ?? 0
@@ -137,10 +137,10 @@ export function createProxy(
   const record = async (e: Parameters<typeof ledger.record>[0]) => { await ledger.record(e); void maybeAnchor() }
 
   const app = express()
-  app.set('trust proxy', 'loopback') // derrière Caddy : la vraie adresse IP du visiteur (limite d'essais de connexion)
-  app.use(express.json({ limit: '60mb' })) // assez grand pour des PDF en base64
+  app.set('trust proxy', 'loopback') // behind Caddy: the visitor's real IP address (sign-in attempt limit)
+  app.use(express.json({ limit: '60mb' })) // large enough for PDFs in base64
 
-  // Connexion OAuth des assistants IA (Claude, ChatGPT…) au serveur MCP distant
+  // OAuth sign-in of AI assistants (Claude, ChatGPT…) to the remote MCP server
   const oauth = new OAuthServer({
     issuer: ISSUER, resource: MCP_URL,
     agentExists: id => !!registry.get(id),
@@ -152,9 +152,9 @@ export function createProxy(
     }
   })
   app.use(oauth.router())
-  app.use(express.static('public')) // le tableau de bord : http://localhost:5050
+  app.use(express.static('public')) // the dashboard: http://localhost:5050
 
-  // Le moteur d'achat : règles, mandats, validations (même longues), paiement, remboursements
+  // The purchase engine: rules, mandates, approvals (even long ones), payment, refunds
   const engine = createPurchaseEngine({
     eurPerSat: EUR_PER_SAT, policy, budget, keys, utxos, walletLock, ledger, record, requests, mandates,
     notifiers: [notifier],
@@ -168,7 +168,7 @@ export function createProxy(
   const sweeper = setInterval(() => void engine.sweep(), Number(process.env.APPROVAL_SWEEP_MS ?? 30_000))
   sweeper.unref()
 
-  // Une demande, vue par l'agent ou le tableau de bord
+  // A request, as seen by the agent or the dashboard
   const requestView = (r: StoredRequest) => ({
     id: r.id, kind: r.kind, agentId: r.agentId, status: r.status, reason: r.reason, purpose: r.purpose,
     createdAt: r.createdAt, expiresAt: r.expiresAt, decidedBy: r.decidedBy, decidedAt: r.decidedAt,
@@ -176,9 +176,9 @@ export function createProxy(
     result: r.result ? { status: r.result.status, paidSats: r.result.paidSats, txid: r.result.txid, mandateId: r.result.mandateId, error: r.result.error } : undefined
   })
 
-  // L'agent s'identifie avec sa clé d'API (jamais avec une clé de portefeuille)
+  // The agent identifies with its API key (never with a wallet key)
   const authAgent = (req: express.Request, res: express.Response) => {
-    // Assistant connecté par OAuth : son jeton est lié à un agent
+    // Assistant connected via OAuth: its token is bound to an agent
     const viaOAuth = oauth.authenticate(req.get('Authorization'))
     if (viaOAuth) {
       const a = registry.get(viaOAuth)
@@ -187,7 +187,7 @@ export function createProxy(
     }
     const agent = registry.authenticate(req.get('Authorization'))
     if (!agent) { res.status(401).json({ error: 'Unknown agent' }); return undefined }
-    // Les clés de démo (dev-…) sont publiques dans le dépôt : interdites dès que le proxy est ouvert au réseau
+    // Demo keys (dev-…) are public in the repository: refused as soon as the proxy is open to the network
     if (EXPOSED && agent.apiKey && !agent.keyHash) {
       res.status(401).json({ error: 'Demo API keys are disabled when the proxy is open to the network. Issue a new key on the admin page.' })
       return undefined
@@ -195,7 +195,7 @@ export function createProxy(
     return agent
   }
 
-  // L'agent consulte SES règles, son budget restant et ses dernières opérations (rien sur les autres agents)
+  // The agent sees ITS rules, remaining budget and latest operations (nothing about other agents)
   app.get('/v1/me', async (req, res) => {
     const agent = authAgent(req, res)
     if (!agent) return
@@ -205,7 +205,7 @@ export function createProxy(
     const round = (v: number) => Math.max(0, Math.round(v * 100) / 100)
     const recent = (await ledger.all()).filter(e => e.agentId === agent.id && e.decision !== 'admin').slice(-10).reverse()
       .map(e => ({ time: e.ts, url: e.url, amountEur: e.amountEur, decision: e.decision, reason: e.reason, approvedBy: e.approvedBy, txid: e.txid, merchant: e.order?.merchant, category: e.order?.category }))
-    // Ce qui reste vraiment : le plus petit des restes du jour et du mois
+    // What is really left: the smaller of the daily and monthly remainders
     const dayLeft = rules ? rules.daily_budget_eur - spentEur : 0
     const monthLeft = rules?.monthly_budget_eur !== undefined ? rules.monthly_budget_eur - spentMonthEur : Infinity
     const categories = rules?.categories ? Object.fromEntries(await Promise.all(Object.entries(rules.categories).map(async ([k, c]) =>
@@ -227,10 +227,10 @@ export function createProxy(
 
     const { url, method = 'GET', body, purpose, dryRun, callbackUrl } = req.body ?? {}
     if (!url) return res.status(400).json({ error: 'Missing url' })
-    // Combien de temps l'agent attend une validation en direct (0 à 120 s). Au-delà, la demande reste ouverte.
+    // How long the agent waits for an approval live (0 to 120 s). After that, the request stays open.
     const waitSeconds = Math.min(120, Math.max(0, Number(req.body?.waitSeconds ?? 120) || 0))
 
-    // Contrôles AVANT tout appel réseau, que le service soit payant ou gratuit
+    // Checks BEFORE any network call, whether the service is paid or free
     const refuse = async (reason: string) => {
       await record({ agentId: agent.id, url: String(url).slice(0, 300), amountSats: 0, amountEur: 0, purpose, decision: 'deny', reason })
       console.log(`✘ ${agent.id} → ${url} : ${reason}`)
@@ -243,7 +243,7 @@ export function createProxy(
       return res.status(400).json({ error: 'callbackUrl must be on one of your allowed domains' })
     }
 
-    // Devis : demande le prix sans payer (la requête est envoyée sans contenu, rien n'est enregistré)
+    // Quote: asks for the price without paying (the request is sent without a body, nothing is recorded)
     if (dryRun) {
       try {
         const r = await fetch(url, { method, redirect: 'manual' })
@@ -278,7 +278,7 @@ export function createProxy(
     res.type(out.contentType).send(out.body)
   })
 
-  // ---- Demandes de l'agent (validations longues) ----
+  // ---- The agent's requests (long approvals) ----
   app.get('/v1/requests', (req, res) => {
     const agent = authAgent(req, res)
     if (!agent) return
@@ -291,7 +291,7 @@ export function createProxy(
     if (!r || r.agentId !== agent.id) return res.status(404).json({ error: 'Unknown request' })
     res.json(requestView(r))
   })
-  // Le résultat de l'achat exécuté après validation (même format que la réponse du service)
+  // The result of the purchase executed after approval (same format as the service response)
   app.get('/v1/requests/:id/result', (req, res) => {
     const agent = authAgent(req, res)
     if (!agent) return
@@ -302,7 +302,7 @@ export function createProxy(
     res.status(r.result.status).set('X-Paid-Sats', String(r.result.paidSats ?? 0)).type(r.result.contentType).send(body)
   })
 
-  // ---- Mandats : validation unique pour des achats qui reviennent ----
+  // ---- Mandates: a single approval for purchases that repeat ----
   app.post('/v1/mandates', async (req, res) => {
     const agent = authAgent(req, res)
     if (!agent) return
@@ -328,15 +328,15 @@ export function createProxy(
     res.json(mandates.active(agent.id).map(m => ({ ...m, usedThisMonthEur: used(m.id) })))
   })
 
-  // Données du tableau de bord : protégées par le mot de passe admin si le proxy est ouvert au réseau
-  // Par défaut : seuls l'administrateur et les personnes qu'il a autorisées voient le tableau de bord et les exports.
-  // L'ancrage (qui dépense des satoshis) reste réservé à l'administrateur.
+  // Dashboard data: protected by the admin password if the proxy is open to the network
+  // By default only the administrator and the people they authorised see the dashboard and the exports.
+  // Anchoring (which spends satoshis) stays reserved to the administrator.
   if (EXPOSED) {
     app.use(PUBLIC_READ ? ['/v1/export'] : ['/v1/ledger', '/v1/stats', '/v1/export'], requireReader)
     app.use('/v1/anchor', requireAdmin)
   }
 
-  // Qui est connecté ? (le tableau de bord affiche le nom et cache les boutons réservés à l'admin)
+  // Who is signed in? (the dashboard shows the name and hides admin-only buttons)
   app.get('/v1/session', (req, res) => {
     const token = String(req.get('X-Admin-Token') ?? '')
     if (isAdmin(req)) return res.json({ role: 'admin' })
@@ -345,10 +345,10 @@ export function createProxy(
     res.json({ role: !EXPOSED ? 'local' : PUBLIC_READ ? 'public' : 'none' })
   })
 
-  // Pour le tableau de bord
+  // For the dashboard
   app.get('/v1/ledger', async (_req, res) => res.json(await ledger.all()))
 
-  // Résumé pour le tableau de bord : budget de chaque agent + validations en attente
+  // Dashboard summary: each agent's budget + pending approvals
   app.get('/v1/stats', async (_req, res) => {
     const list = await Promise.all(registry.list().map(async a => {
       const r = policy.rulesFor(a.id)
@@ -369,16 +369,16 @@ export function createProxy(
   })
   app.get('/v1/ledger/verify', async (_req, res) => res.json(await ledger.verify()))
 
-  // Vérifie le journal local CONTRE les ancrages publiés sur BSV
+  // Checks the local log AGAINST the anchors published on BSV
   app.get('/v1/ledger/verify-chain', async (_req, res) => {
     try { res.json(await verifyAgainstChain(await ledger.all(), anchorLog.all(), fetchTxHex)) }
     catch (e) { res.status(502).json({ error: (e as Error).message }) }
   })
 
-  // ---- Administration : protégée par le mot de passe ADMIN_TOKEN ----
+  // ---- Administration: protected by the ADMIN_TOKEN password ----
   const admin = express.Router()
   admin.use(requireAdmin)
-  // Qui a fait la modification : nom saisi sur la page d'administration (pour le journal d'audit)
+  // Who made the change: name entered on the admin page (for the audit log)
   const who = (req: express.Request) => String(req.get('X-Admin-Name') ?? '').trim().slice(0, 40) || 'admin'
   const logChange = (req: express.Request, agentId: string, change: string, action?: string) =>
     record({ agentId, url: `admin://agents/${agentId}`, amountSats: 0, amountEur: 0, decision: 'admin', reason: change, approvedBy: who(req), action })
@@ -467,8 +467,8 @@ export function createProxy(
       res.json({ ok: true, apiKey })
     } catch (e) { res.status(400).json({ error: (e as Error).message }) }
   })
-  // Validation depuis le tableau de bord (réservée à l'administrateur)
-  // Sur cet ordinateur seulement (proxy non exposé), pas besoin du mot de passe pour décider
+  // Approval from the dashboard (reserved to the administrator)
+  // On this computer only (proxy not exposed), no password needed to decide
   app.post('/v1/admin/approvals/:id', (req, res, next) => EXPOSED ? requireAdmin(req, res, next) : next(), async (req, res) => {
     const r = requests.get(req.params.id)
     if (!r || r.status !== 'pending') return res.status(404).json({ error: 'This request is no longer waiting (already decided or expired)' })
@@ -477,7 +477,7 @@ export function createProxy(
     res.json({ ok: true, message })
   })
 
-  // Mandats en cours (administration) : liste et révocation
+  // Current mandates (administration): list and revoke
   admin.get('/mandates', (_req, res) => {
     const used = engine.usedByMandate(ledger.allSync())
     res.json(mandates.list().slice().reverse().map(m => ({ ...m, active: !m.revokedAt && m.validUntil > new Date().toISOString(), usedThisMonthEur: used(m.id) })))
@@ -489,7 +489,7 @@ export function createProxy(
     res.json({ ok: true })
   })
 
-  // Connexion d'un assistant IA : code à usage unique pour un agent
+  // Connecting an AI assistant: single-use code for one agent
   admin.post('/agents/:id/pairing', async (req, res) => {
     const id = req.params.id
     if (!registry.get(id)) return res.status(404).json({ error: 'Unknown agent' })
@@ -504,7 +504,7 @@ export function createProxy(
     res.json({ ok: true })
   })
 
-  // Accès au tableau de bord (lecture seule) pour les personnes autorisées
+  // Dashboard access (read-only) for authorised people
   const viewerLog = (req: express.Request, change: string) =>
     record({ agentId: 'dashboard-access', url: 'admin://dashboard-access', amountSats: 0, amountEur: 0, decision: 'admin', reason: change, approvedBy: who(req) })
   admin.get('/viewers', (_req, res) => res.json(viewers.list()))
@@ -523,7 +523,7 @@ export function createProxy(
   })
   app.use('/v1/admin', admin)
 
-  // Export comptable du mois (par défaut : le mois en cours)
+  // Accounting export of the month (default: the current month)
   const currentMonth = () => new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Berlin' }).slice(0, 7)
   app.get('/v1/export/datev', async (req, res) => {
     try {
@@ -537,7 +537,7 @@ export function createProxy(
     res.type('html').send(monthlyStatementHtml(await ledger.all(), anchorLog.all(), month, loadAccountingConfig()))
   })
 
-  // Ancrer tout de suite (bouton du tableau de bord ou npm run anchor)
+  // Anchor right now (dashboard button or npm run anchor)
   app.post('/v1/anchor', async (_req, res) => {
     try { res.json(await anchorNow() ?? { message: 'Nothing to anchor yet' }) }
     catch (e) { res.status(502).json({ error: (e as Error).message }) }

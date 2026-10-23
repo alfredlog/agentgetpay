@@ -1,6 +1,6 @@
-// Test de la connexion OAuth, avec le VRAI client MCP officiel (celui qu'utilisent les assistants IA).
-// Lance un proxy et un serveur MCP dans un dossier temporaire (ton journal et ta config ne sont pas touchés).
-// Aucun paiement : on vérifie la connexion, l'identité de l'agent, le renouvellement et la déconnexion.
+// Test of the OAuth sign-in with the REAL official MCP client (the one AI assistants use).
+// Starts a proxy and an MCP server in a temporary folder (your log and config are not touched).
+// No payment: checks the sign-in, the agent identity, the renewal and the disconnection.
 import { mkdtempSync, cpSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -37,15 +37,15 @@ const admin = (path: string, method = 'GET') => fetch(`${PROXY}/v1/admin${path}`
 try {
   for (let i = 0; i < 60; i++) { if (await fetch(`${PROXY}/v1/stats`).then(() => fetch(MCP, { method: 'POST' })).then(() => true, () => false)) break; await sleep(250) }
 
-  // 1. Sans jeton : 401 + adresse de la connexion
+  // 1. Without a token: 401 + sign-in address
   const r401 = await fetch(MCP, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
   check(r401.status === 401 && /resource_metadata=/.test(r401.headers.get('WWW-Authenticate') ?? ''), 'MCP server asks to sign in (401 + resource_metadata)')
 
-  // 2. L'administrateur crée un code de connexion pour docs-01
+  // 2. The administrator creates a connection code for docs-01
   const pairing = await admin('/agents/docs-01/pairing', 'POST')
   check(/^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(pairing.code), `Admin issued a connection code (${pairing.code})`)
 
-  // 3. Le client MCP officiel fait la connexion OAuth ; on joue l'employé qui tape le code
+  // 3. The official MCP client signs in with OAuth; we play the employee typing the code
   let authCode = ''
   const store: Record<string, any> = {}
   const provider: OAuthClientProvider = {
@@ -84,7 +84,7 @@ try {
   await t.finishAuth(authCode)
   check(!!store.tokens?.access_token?.startsWith('agoa_') && !!store.tokens?.refresh_token, 'Tokens received (PKCE verified)')
 
-  // 4. L'assistant agit comme docs-01
+  // 4. The assistant acts as docs-01
   let client = await connect()
   const budget = await client.callTool({ name: 'check_budget', arguments: {} }) as any
   const text = budget.content?.[0]?.text ?? ''
@@ -96,7 +96,7 @@ try {
   const ledger = await fetch(`${PROXY}/v1/ledger`).then(r => r.json())
   check(ledger.some((e: any) => e.reason === 'Assistant connected: Test assistant' && e.approvedBy === 'Test admin'), 'Connection recorded in the audit log')
 
-  // 5. Renouvellement : l'ancien jeton de rafraîchissement ne marche plus
+  // 5. Renewal: the old refresh token no longer works
   const oldRefresh = store.tokens.refresh_token
   const refresh = (rt: string) => fetch(`${PROXY}/token`, { method: 'POST', body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: rt, client_id: store.client.client_id }) })
   const r1 = await refresh(oldRefresh)
@@ -105,7 +105,7 @@ try {
   check((await refresh(oldRefresh)).status === 400, 'Old refresh token is rejected (rotation)')
   store.tokens = fresh
 
-  // 6. Déconnexion par l'administrateur
+  // 6. Disconnection by the administrator
   await admin(`/connections/${conns[0].id}`, 'DELETE')
   const me = await fetch(`${PROXY}/v1/me`, { headers: { Authorization: `Bearer ${fresh.access_token}` } })
   check(me.status === 401, 'After "Disconnect", the token no longer works')
@@ -118,7 +118,7 @@ try {
   for (let i = 0; i < 11; i++) last = (await fetch(`${PROXY}/authorize`, { method: 'POST', body: new URLSearchParams({ request_id: id, mode: 'code', code: `ZZZZ-ZZZ${i}` }) })).status
   check(last === 429, 'Guessing codes is blocked after 10 attempts')
 
-  // 8. Une adresse de retour non enregistrée n'est jamais utilisée
+  // 8. An unregistered return address is never used
   const evil = await fetch(`${PROXY}/authorize?` + new URLSearchParams({ response_type: 'code', client_id: store.client.client_id, redirect_uri: 'https://evil.example/cb', code_challenge: 'x'.repeat(43), code_challenge_method: 'S256' }), { redirect: 'manual' })
   check(evil.status === 400, 'Unregistered return address is refused (no redirect)')
 } catch (e) {

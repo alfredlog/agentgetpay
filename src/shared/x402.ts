@@ -1,10 +1,10 @@
-// Types et helpers du protocole x402 / BRC-166 (profil P2PKH, transaction brute).
+// Types and helpers of the x402 / BRC-166 protocol (P2PKH profile, raw transaction).
 export const NETWORK = 'bsv:testnet'
 
 export interface PaymentRequirements {
   scheme: 'exact'
   network: string
-  amount: string // en satoshis, sous forme de texte
+  amount: string // in satoshis, as text
   asset: 'BSV'
   payTo: string
   maxTimeoutSeconds: number
@@ -18,24 +18,24 @@ export interface PaymentRequirements {
   }
 }
 
-// Ce que le marchand vend, décrit dans l'offre 402 (extension facultative).
-// Le proxy s'en sert pour appliquer les règles d'achat : catégorie, prix unitaire, adresse de livraison.
+// What the merchant sells, described in the 402 offer (optional extension).
+// The proxy uses it to apply the purchase rules: category, unit price, delivery address.
 export interface OrderItem {
   name: string
   quantity: number
   unitPriceSats: number
-  unit?: string // ex. "night" (nuit d'hôtel), "item", "month"
+  unit?: string // e.g. "night" (hotel night), "item", "month"
 }
 export interface ShippingAddress {
   name?: string
   street: string
   postalCode: string
   city: string
-  country: string // code ISO, ex. "DE"
+  country: string // ISO code, e.g. "DE"
 }
 export interface OrderInfo {
-  merchant: string // nom du marchand, ex. "Alpenblick Hotel"
-  category: string // ex. "travel.hotel", "office.supplies", "software.subscription"
+  merchant: string // merchant name, e.g. "Alpenblick Hotel"
+  category: string // e.g. "travel.hotel", "office.supplies", "software.subscription"
   items: OrderItem[]
   shipTo?: ShippingAddress
 }
@@ -51,11 +51,11 @@ export interface PaymentPayload {
   x402Version: 2
   accepted: PaymentRequirements
   payload: { lockingScriptHex: string; rawtx: string }
-  // Où renvoyer l'argent en cas d'annulation (adresse du payeur)
+  // Where to send the money back if the order is cancelled (payer's address)
   extensions?: { refundTo?: string }
 }
 
-// Remboursement annoncé par le vendeur (en-tête PAYMENT-REFUND) : la transaction qui rend l'argent
+// Refund announced by the seller (PAYMENT-REFUND header): the transaction that pays the money back
 export interface RefundNotice {
   paymentTxid: string
   refundTxid: string
@@ -71,7 +71,7 @@ export interface PaymentResponse {
   extensions?: { status: string }
 }
 
-// Les en-têtes x402 transportent du JSON encodé en base64.
+// x402 headers carry base64-encoded JSON.
 export const encode = (obj: unknown): string =>
   Buffer.from(JSON.stringify(obj), 'utf8').toString('base64')
 

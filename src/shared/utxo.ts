@@ -1,5 +1,5 @@
-// Interface pour trouver les pièces (UTXO) d'une adresse.
-// Implémentation réelle : WhatsOnChain. En test : une version simulée.
+// Interface to find the coins (UTXO) of an address.
+// Real implementation: WhatsOnChain. In tests: a simulated version.
 import { Transaction } from '@bsv/sdk'
 import { getUtxos, getTxHex } from '../woc.js'
 
@@ -25,9 +25,9 @@ export class WhatsOnChainUtxoProvider implements UtxoProvider {
   }
 }
 
-// Enchaîne les paiements sans attendre WhatsOnChain : après chaque paiement réussi,
-// la "monnaie" de notre propre transaction devient la pièce du paiement suivant.
-// Sans ça, deux paiements rapides réutiliseraient la même pièce → double dépense refusée.
+// Chains payments without waiting for WhatsOnChain: after each successful payment,
+// the "change" of our own transaction becomes the coin of the next payment.
+// Without this, two quick payments would reuse the same coin → double spend refused.
 export class ChainedUtxoProvider implements UtxoProvider {
   private next?: SpendableUtxo
   private spent = new Set<string>()
