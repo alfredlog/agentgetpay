@@ -38,10 +38,10 @@ const eur = (v: number) => v.toFixed(2).replace('.', ',') // DATEV: decimal comm
 
 // Only payments actually made (with a transaction) are booked
 export const paidInMonth = (entries: LedgerEntry[], month: string) =>
-  entries.filter(e => e.decision === 'allow' && e.txid && monthOf(e.ts) === month)
+  entries.filter(e => e.decision === 'allow' && (e.txid || e.authId) && monthOf(e.ts) === month)
 // Payments AND refunds of the month (a refund is a credit booking)
 export const bookedInMonth = (entries: LedgerEntry[], month: string) =>
-  entries.filter(e => (e.decision === 'allow' || e.decision === 'refund') && e.txid && monthOf(e.ts) === month)
+  entries.filter(e => (e.decision === 'allow' || e.decision === 'refund') && (e.txid || e.authId) && monthOf(e.ts) === month)
 const label = (e: LedgerEntry) => {
   if (e.order) return `${e.order.merchant} ${e.order.category}`
   try { const u = new URL(e.url); return `${u.host}${u.pathname}` } catch { return e.url }
@@ -83,7 +83,7 @@ export class DatevExporter implements AccountingExporter {
         this.cfg.expenseAccount, this.cfg.walletAccount, q(''),
         `${b.d}${b.m}`,                       // Belegdatum (TTMM)
         q(`AGP-${e.seq}`),                    // Belegfeld 1: voucher number = audit log entry
-        q(e.txid!.slice(0, 12)),              // Belegfeld 2: start of the BSV transaction
+        q((e.txid ?? e.authId)!.slice(0, 12)), // Belegfeld 2: start of the BSV transaction, or the card authorization id
         '', q(text)
       ].join(';')
     })
@@ -123,12 +123,12 @@ export function monthlyStatementHtml(entries: LedgerEntry[], anchors: Anchor[], 
 <div class="muted">${esc(cfg.companyName)} · generated ${esc(date(new Date().toISOString()))} · ${paid.filter(e => e.decision === 'allow').length} payment(s)${paid.some(e => e.decision === 'refund') ? `, ${paid.filter(e => e.decision === 'refund').length} refund(s)` : ''} · amounts in EUR</div>
 
 <table>
-  <thead><tr><th>Voucher</th><th>Date</th><th>Agent</th><th>Service</th><th>Purpose</th><th>Approved by</th><th class="num">Amount</th><th>BSV transaction</th></tr></thead>
+  <thead><tr><th>Voucher</th><th>Date</th><th>Agent</th><th>Service</th><th>Purpose</th><th>Approved by</th><th class="num">Amount</th><th>Payment proof</th></tr></thead>
   <tbody>
   ${paid.map(e => `<tr><td>AGP-${e.seq}</td><td>${esc(date(e.ts))}</td><td>${esc(e.agentId)}</td>
     <td>${esc(e.decision === 'refund' ? `Refund · ${label(e)}` : label(e))}</td><td>${esc(e.purpose)}</td>
     <td>${esc(e.decision === 'refund' ? '—' : e.approvedBy ?? 'Within policy')}</td><td class="num">${e.decision === 'refund' ? '−' : ''}€${e.amountEur.toFixed(2)}</td>
-    <td><a href="https://test.whatsonchain.com/tx/${e.txid}">${e.txid!.slice(0, 12)}…</a></td></tr>`).join('')}
+    <td>${e.txid ? `<a href="https://test.whatsonchain.com/tx/${e.txid}">${e.txid.slice(0, 12)}…</a>` : `Card · ${esc(e.authId)}`}</td></tr>`).join('')}
   <tr class="total"><td colspan="6">Net total</td><td class="num">€${total.toFixed(2)}</td><td></td></tr>
   </tbody>
 </table>

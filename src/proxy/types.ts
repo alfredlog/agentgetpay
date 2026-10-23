@@ -9,6 +9,7 @@ export interface PaymentRequest {
   amountSats: number
   amountEur: number
   purpose?: string // why the agent pays (for the audit)
+  rail?: 'bsv' | 'card' // how it would be paid (default: BSV via HTTP 402)
   order?: OrderInfo // what is bought, if the merchant describes it (category, items, delivery)
 }
 
@@ -56,7 +57,7 @@ export interface LedgerEntry {
   amountSats: number
   amountEur: number
   purpose?: string
-  decision: Decision['kind'] | 'error' | 'admin' | 'refund' // 'admin' = rule change; 'refund' = refund received
+  decision: Decision['kind'] | 'error' | 'admin' | 'refund' | 'card' // 'admin' = rule change; 'refund' = refund received; 'card' = virtual card issued
   reason?: string
   txid?: string
   order?: OrderInfo   // what was bought (merchant, category, items, delivery)
@@ -64,7 +65,10 @@ export interface LedgerEntry {
   action?: string     // for 'admin' entries: type of change (e.g. 'budget_reset')
   requestId?: string  // related approval request (R-…)
   mandateId?: string  // payment covered by a mandate (M-…)
-  refundOf?: string   // for a refund: the transaction of the refunded payment
+  refundOf?: string
+  rail?: 'bsv' | 'card' // how it was paid (default: BSV)
+  cardId?: string     // card rail: the virtual card used
+  authId?: string     // card rail: the card authorization id (the receipt reference)   // for a refund: the transaction of the refunded payment
   prevHash: string
   hash: string
 }
