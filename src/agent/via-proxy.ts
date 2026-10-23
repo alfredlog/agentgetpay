@@ -18,7 +18,7 @@ async function call(path: string, purpose: string) {
 
 await call('/api/quote', 'Quote for the report')           // €0.10 → allowed
 await call('/api/quote', 'Second quote')                  // €0.10 → allowed
-await call('/api/analysis', 'Market analysis')               // 0,18 € → validation humaine requise
+await call('/api/analysis', 'Market analysis')               // €0.18 → human approval required
 await call('/api/report', 'Full report')                   // €0.30 → above the maximum
 await call('/api/quote', 'Third quote')                 // €0.10 → allowed
 await call('/api/quote', 'Fourth quote')                 // €0.10 → allowed

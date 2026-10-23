@@ -34,14 +34,14 @@ export interface StoredRequest {
   status: RequestStatus
   decidedBy?: string
   decidedAt?: string
-  // Achat
+  // Purchase
   url?: string
   method?: string
   amountSats?: number        // approved amount: the execution will never pay more
   amountEur?: number
   order?: OrderInfo
   callbackUrl?: string       // the agent is notified here when the request is finished
-  // Mandat
+  // Mandate
   mandate?: MandateTerms
   // Result
   result?: { status: number; contentType: string; paidSats?: number; txid?: string; mandateId?: string; error?: string }

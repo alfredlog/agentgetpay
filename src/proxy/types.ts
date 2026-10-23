@@ -39,7 +39,7 @@ export interface BudgetStore {
   tryReserve(agentId: string, sats: number, limits: BudgetLimits): Promise<string | undefined>
   release(agentId: string, sats: number, category?: string): Promise<void>
   reset(agentId: string): Promise<void> // resets the daily counter (administration)
-  credit(agentId: string, sats: number, category: string | undefined, originalTs: string): void // remboursement
+  credit(agentId: string, sats: number, category: string | undefined, originalTs: string): void // refund
 }
 
 // Holds the keys and signs. Hackathon: environment variable. Enterprise: HashiCorp Vault.
