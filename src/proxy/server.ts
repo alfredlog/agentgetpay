@@ -4,14 +4,15 @@ import 'dotenv/config'
 import express from 'express'
 import { appendFileSync } from 'node:fs'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
-import { payFetch } from '../agent/pay-fetch.js'
 import { WhatsOnChainUtxoProvider, UtxoProvider, ChainedUtxoProvider } from '../shared/utxo.js'
 import { JsonPolicyEngine, fmt, formatAddress } from './policy.js'
 import { MemoryBudgetStore } from './budget.js'
 import { EnvKeyStore } from './keystore.js'
 import { JsonlLedger } from './ledger.js'
-import { Decision, ApprovalChannel } from './types.js'
-import { TelegramApprovalChannel, AutoApprovalChannel, DashboardOnlyApprovalChannel } from './approval.js'
+import { TelegramNotifier, AutoNotifier, DashboardOnlyNotifier, type ApprovalNotifier } from './approval.js'
+import { RequestStore, type StoredRequest } from './requests.js'
+import { MandateStore } from './mandates.js'
+import { createPurchaseEngine } from './purchase.js'
 import { AnchorLog, BsvAnchorRail, verifyAgainstChain, cachedWocFetch, FetchTxHex, Anchor } from './anchor.js'
 import { Mutex } from '../shared/mutex.js'
 import { DatevExporter, loadAccountingConfig, monthlyStatementHtml } from './accounting.js'
@@ -19,8 +20,7 @@ import { AgentRegistry, validateRules, validAgentId } from './registry.js'
 import { ViewerStore, validViewerName } from './viewers.js'
 import { OAuthServer } from './oauth.js'
 import type { Broadcaster } from '@bsv/sdk'
-import { decode, PaymentRequired, OrderInfo } from '../shared/x402.js'
-import { validOrder } from '../agent/pay-fetch.js'
+
 
 // Testnet : les coins n'ont pas de valeur, on fixe un taux fictif pour des montants lisibles.
 // Mainnet : ce taux viendra d'une API de cours en temps réel.
@@ -59,12 +59,15 @@ const anchorLog = new AnchorLog('data/anchors.jsonl')
 const ANCHOR_EVERY = Number(process.env.ANCHOR_EVERY ?? 5) // ancrer sur BSV toutes les N entrées du journal
 
 // Validation humaine : Telegram si configuré ; on peut TOUJOURS aussi décider sur le tableau de bord.
-// Sans Telegram, seul le tableau de bord décide. APPROVAL_AUTO=approved|rejected : réponse automatique (tests).
-const approvals: ApprovalChannel = process.env.APPROVAL_AUTO
-  ? new AutoApprovalChannel(process.env.APPROVAL_AUTO === 'approved' ? 'approved' : 'rejected')
+// APPROVAL_AUTO=approved|rejected : réponse automatique (tests). Une demande reste ouverte APPROVAL_TTL_HOURS heures.
+const notifier: ApprovalNotifier = process.env.APPROVAL_AUTO
+  ? new AutoNotifier(process.env.APPROVAL_AUTO === 'approved' ? 'approved' : 'rejected', Number(process.env.APPROVAL_AUTO_DELAY_MS ?? 0))
   : process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID
-    ? new TelegramApprovalChannel(process.env.TELEGRAM_BOT_TOKEN, process.env.TELEGRAM_CHAT_ID)
-    : new DashboardOnlyApprovalChannel()
+    ? new TelegramNotifier(process.env.TELEGRAM_BOT_TOKEN, process.env.TELEGRAM_CHAT_ID)
+    : new DashboardOnlyNotifier()
+const APPROVAL_TTL_HOURS = Number(process.env.APPROVAL_TTL_HOURS ?? 72)
+const requests = new RequestStore()
+const mandates = new MandateStore()
 
 // Mot de passe administrateur (comparaison en temps constant)
 const isAdmin = (req: express.Request) => {
@@ -151,11 +154,27 @@ export function createProxy(
   app.use(oauth.router())
   app.use(express.static('public')) // le tableau de bord : http://localhost:5050
 
-  // Validations en attente, pour les afficher en direct sur le tableau de bord
-  const pending = new Map<number, { id: number; agentId: string; amountEur: number; url: string; purpose?: string; reason: string; since: string; order?: OrderInfo }>()
-  // Décisions prises sur le tableau de bord, pour chaque demande en attente
-  const dashboardDecide = new Map<number, (r: { status: 'approved' | 'rejected'; by: string }) => void>()
-  let pendingSeq = 0
+  // Le moteur d'achat : règles, mandats, validations (même longues), paiement, remboursements
+  const engine = createPurchaseEngine({
+    eurPerSat: EUR_PER_SAT, policy, budget, keys, utxos, walletLock, ledger, record, requests, mandates,
+    notifiers: [notifier],
+    isActive: id => registry.isActive(id),
+    checkTarget: (url, agentId) => checkTarget(url, registry.rulesFor(agentId)?.allowed_domains),
+    broadcaster: opts.broadcaster,
+    approvalTtlHours: APPROVAL_TTL_HOURS,
+    publicBase: ISSUER
+  })
+  void engine.resume()
+  const sweeper = setInterval(() => void engine.sweep(), Number(process.env.APPROVAL_SWEEP_MS ?? 30_000))
+  sweeper.unref()
+
+  // Une demande, vue par l'agent ou le tableau de bord
+  const requestView = (r: StoredRequest) => ({
+    id: r.id, kind: r.kind, agentId: r.agentId, status: r.status, reason: r.reason, purpose: r.purpose,
+    createdAt: r.createdAt, expiresAt: r.expiresAt, decidedBy: r.decidedBy, decidedAt: r.decidedAt,
+    url: r.url, amountEur: r.amountEur, amountSats: r.amountSats, order: r.order, mandate: r.mandate,
+    result: r.result ? { status: r.result.status, paidSats: r.result.paidSats, txid: r.result.txid, mandateId: r.result.mandateId, error: r.result.error } : undefined
+  })
 
   // L'agent s'identifie avec sa clé d'API (jamais avec une clé de portefeuille)
   const authAgent = (req: express.Request, res: express.Response) => {
@@ -196,6 +215,8 @@ export function createProxy(
       remainingEur: round(Math.min(dayLeft, monthLeft)),
       remainingMonthEur: Number.isFinite(monthLeft) ? round(monthLeft) : undefined,
       categories,
+      mandates: mandates.active(agent.id).map(m => ({ id: m.id, domain: m.domain, category: m.category, maxEurPerMonth: m.maxEurPerMonth, validUntil: m.validUntil, usedThisMonthEur: engine.usedByMandate(ledger.allSync())(m.id) })),
+      pendingRequests: requests.list(r => r.agentId === agent.id && r.status === 'pending').map(r => r.id),
       recent
     })
   })
@@ -204,8 +225,10 @@ export function createProxy(
     const agent = authAgent(req, res)
     if (!agent) return
 
-    const { url, method = 'GET', body, purpose, dryRun } = req.body ?? {}
+    const { url, method = 'GET', body, purpose, dryRun, callbackUrl } = req.body ?? {}
     if (!url) return res.status(400).json({ error: 'Missing url' })
+    // Combien de temps l'agent attend une validation en direct (0 à 120 s). Au-delà, la demande reste ouverte.
+    const waitSeconds = Math.min(120, Math.max(0, Number(req.body?.waitSeconds ?? 120) || 0))
 
     // Contrôles AVANT tout appel réseau, que le service soit payant ou gratuit
     const refuse = async (reason: string) => {
@@ -216,20 +239,21 @@ export function createProxy(
     if (!registry.isActive(agent.id)) return refuse('Agent suspended by an administrator')
     const target = checkTarget(url, registry.rulesFor(agent.id)?.allowed_domains)
     if (target) return refuse(target)
+    if (callbackUrl !== undefined && checkTarget(callbackUrl, registry.rulesFor(agent.id)?.allowed_domains)) {
+      return res.status(400).json({ error: 'callbackUrl must be on one of your allowed domains' })
+    }
 
     // Devis : demande le prix sans payer (la requête est envoyée sans contenu, rien n'est enregistré)
     if (dryRun) {
       try {
         const r = await fetch(url, { method, redirect: 'manual' })
         if (r.status !== 402) return res.json({ paymentRequired: false, status: r.status })
-        const offer = decode<PaymentRequired>(r.headers.get('PAYMENT-REQUIRED') ?? '')
-        const sats = Number(offer.accepts?.[0]?.amount)
-        if (!Number.isFinite(sats)) return res.status(502).json({ error: 'The service returned an unreadable price' })
-        const amountEur = sats * EUR_PER_SAT
-        const order = validOrder(offer.extensions?.order)
-        const d = await policy.evaluate({ agentId: agent.id, url, amountSats: sats, amountEur, purpose, order })
+        const q = engine.quoteOrder(r.headers.get('PAYMENT-REQUIRED'))
+        if (!q || !Number.isFinite(q.sats)) return res.status(502).json({ error: 'The service returned an unreadable price' })
+        const amountEur = q.sats * EUR_PER_SAT
+        const d = await policy.evaluate({ agentId: agent.id, url, amountSats: q.sats, amountEur, purpose, order: q.order })
         return res.json({
-          paymentRequired: true, priceSats: sats, priceEur: amountEur, description: offer.resource?.description, order,
+          paymentRequired: true, priceSats: q.sats, priceEur: amountEur, description: q.description, order: q.order,
           decision: d.kind, reason: d.kind === 'allow' ? undefined : d.reason
         })
       } catch (e) {
@@ -237,79 +261,71 @@ export function createProxy(
       }
     }
 
-    let decision: Decision | undefined
-    let approvedBy: string | undefined
-    let reserved = 0
-    let amountSats = 0
-    let order: OrderInfo | undefined
-
-    try {
-      const { response, paid } = await payFetch(url, {
-        method,
-        body: body ? JSON.stringify(body) : undefined,
-        headers: body ? { 'Content-Type': 'application/json' } : undefined,
-        redirect: 'manual' // ne jamais suivre une redirection : elle pourrait mener hors des domaines autorisés
-      }, {
-        address: keys.address(agent.id),
-        unlocker: () => keys.unlocker(agent.id),
-        utxos,
-        spendLock: walletLock,
-        onSpent: tx => utxos.remember(tx), // la monnaie sert au prochain paiement
-        beforePay: async offer => {
-          amountSats = offer.amount
-          order = offer.order
-          const amountEur = offer.amount * EUR_PER_SAT
-          const payReq = { agentId: agent.id, url, amountSats, amountEur, purpose, order }
-          decision = await policy.evaluate(payReq)
-
-          // Au-dessus du seuil : on demande à un humain, et l'agent attend
-          if (decision.kind === 'needs_approval') {
-            console.log(`⏳ ${agent.id} is waiting for approval of ${fmt(amountEur)}…`)
-            const pid = ++pendingSeq
-            pending.set(pid, { id: pid, agentId: agent.id, amountEur, url, purpose, reason: decision.reason, since: new Date().toISOString(), order })
-            // Le premier qui répond gagne : Telegram ou le tableau de bord
-            const ctl = new AbortController()
-            const fromDashboard = new Promise<{ status: 'approved' | 'rejected'; by: string }>(resolve =>
-              dashboardDecide.set(pid, r => { ctl.abort(r); resolve(r) }))
-            const answer = await Promise.race([approvals.requestApproval(payReq, decision.reason, ctl.signal), fromDashboard])
-              .finally(() => { pending.delete(pid); dashboardDecide.delete(pid) })
-            if (answer.status !== 'approved') {
-              decision = { kind: 'deny', reason: answer.status === 'timeout' ? 'No answer to the approval request' : `Rejected by ${answer.by}` }
-              return false
-            }
-            approvedBy = answer.by
-            decision = { kind: 'allow' }
-          }
-          if (decision.kind !== 'allow') return false
-          // Réserver le budget AVANT de signer (deux paiements simultanés ne peuvent pas dépasser)
-          const over = await budget.tryReserve(agent.id, amountSats, policy.limitsFor(agent.id, order?.category))
-          if (over) {
-            decision = { kind: 'deny', reason: over }
-            return false
-          }
-          reserved = amountSats
-          return true
-        }
+    const out = await engine.attempt({ agentId: agent.id, url, method, body, purpose, callbackUrl, waitMs: waitSeconds * 1000 })
+    engine.settleInline(out)
+    if (out.kind === 'pending') {
+      const r = out.request
+      return res.status(202).json({
+        decision: 'pending_approval', requestId: r.id, reason: r.reason, expiresAt: r.expiresAt,
+        message: `A human must approve this purchase (${r.reason}). Request ${r.id} stays open until ${r.expiresAt}. ` +
+          'Continue with other work; check GET /v1/requests/' + r.id + ' later. When it is approved, the purchase is made automatically and the result is kept for you.'
       })
-
-      if (paid) {
-        await record({ agentId: agent.id, url, amountSats, amountEur: amountSats * EUR_PER_SAT, purpose, decision: 'allow', txid: paid.txid, approvedBy, order })
-        console.log(`✔ ${agent.id} paid ${fmt(amountSats * EUR_PER_SAT)} (${amountSats} sats) → ${url}${approvedBy ? ` — approved by ${approvedBy}` : ''}`)
-      }
-      res.status(response.status).set('X-Paid-Sats', String(paid?.amount ?? 0))
-        .type(response.headers.get('content-type') ?? 'text/plain').send(Buffer.from(await response.arrayBuffer()))
-    } catch (err) {
-      if (reserved) await budget.release(agent.id, reserved, order?.category) // paiement échoué : on rend le budget
-      const d = decision && decision.kind !== 'allow' ? decision : undefined
-      // "fetch failed" = le service n'a pas répondu du tout (par exemple : le vendeur n'est pas lancé)
-      if ((err as Error).message === 'fetch failed') (err as Error).message = `Service unreachable: ${new URL(url).host}`
-      await record({
-        agentId: agent.id, url, amountSats, amountEur: amountSats * EUR_PER_SAT, purpose, order,
-        decision: d?.kind ?? 'error', reason: d?.reason ?? (err as Error).message
-      })
-      console.log(`✘ ${agent.id} → ${url} : ${d?.reason ?? (err as Error).message}`)
-      res.status(d ? 403 : 502).json({ decision: d?.kind ?? 'error', reason: d?.reason ?? (err as Error).message })
     }
+    if (out.kind === 'refused') return res.status(out.status).json({ decision: out.decision, reason: out.reason, requestId: out.requestId })
+    res.status(out.status).set('X-Paid-Sats', String(out.paidSats))
+    if (out.refundedSats) res.set('X-Refunded-Sats', String(out.refundedSats))
+    if (out.requestId) res.set('X-Request-Id', out.requestId)
+    res.type(out.contentType).send(out.body)
+  })
+
+  // ---- Demandes de l'agent (validations longues) ----
+  app.get('/v1/requests', (req, res) => {
+    const agent = authAgent(req, res)
+    if (!agent) return
+    res.json(requests.list(r => r.agentId === agent.id).slice(-50).reverse().map(requestView))
+  })
+  app.get('/v1/requests/:id', (req, res) => {
+    const agent = authAgent(req, res)
+    if (!agent) return
+    const r = requests.get(req.params.id)
+    if (!r || r.agentId !== agent.id) return res.status(404).json({ error: 'Unknown request' })
+    res.json(requestView(r))
+  })
+  // Le résultat de l'achat exécuté après validation (même format que la réponse du service)
+  app.get('/v1/requests/:id/result', (req, res) => {
+    const agent = authAgent(req, res)
+    if (!agent) return
+    const r = requests.get(req.params.id)
+    if (!r || r.agentId !== agent.id) return res.status(404).json({ error: 'Unknown request' })
+    const body = requests.result(r.id)
+    if (!r.result || !body) return res.status(409).json({ error: `No result yet: the request is ${r.status}` })
+    res.status(r.result.status).set('X-Paid-Sats', String(r.result.paidSats ?? 0)).type(r.result.contentType).send(body)
+  })
+
+  // ---- Mandats : validation unique pour des achats qui reviennent ----
+  app.post('/v1/mandates', async (req, res) => {
+    const agent = authAgent(req, res)
+    if (!agent) return
+    const b = req.body ?? {}
+    const rules = registry.rulesFor(agent.id)
+    const domain = String(b.domain ?? '').trim().toLowerCase()
+    const max = Number(b.maxEurPerMonth), months = Number(b.months ?? 12)
+    if (!rules?.allowed_domains.includes(domain)) return res.status(400).json({ error: `domain must be one of your allowed domains: ${rules?.allowed_domains.join(', ')}` })
+    if (!Number.isFinite(max) || max <= 0) return res.status(400).json({ error: 'maxEurPerMonth must be a positive number' })
+    if (rules.monthly_budget_eur !== undefined && max > rules.monthly_budget_eur) return res.status(400).json({ error: `maxEurPerMonth cannot exceed your monthly budget (${fmt(rules.monthly_budget_eur)})` })
+    if (!Number.isInteger(months) || months < 1 || months > 24) return res.status(400).json({ error: 'months must be between 1 and 24' })
+    const category = b.category ? String(b.category).trim().toLowerCase() : undefined
+    if (category && !/^[a-z0-9]+(\.[a-z0-9]+)*$/.test(category)) return res.status(400).json({ error: 'Invalid category' })
+    if (b.callbackUrl !== undefined && checkTarget(b.callbackUrl, rules.allowed_domains)) return res.status(400).json({ error: 'callbackUrl must be on one of your allowed domains' })
+    const waitSeconds = Math.min(120, Math.max(0, Number(b.waitSeconds ?? 0) || 0))
+    const r = await engine.requestMandate(agent.id, { domain, category, maxEurPerMonth: Math.round(max * 100) / 100, months }, b.purpose ? String(b.purpose).slice(0, 200) : undefined, b.callbackUrl, waitSeconds * 1000)
+    res.status(r.status === 'pending' ? 202 : 200).json(requestView(r))
+  })
+  app.get('/v1/mandates', (req, res) => {
+    const agent = authAgent(req, res)
+    if (!agent) return
+    const used = engine.usedByMandate(ledger.allSync())
+    res.json(mandates.active(agent.id).map(m => ({ ...m, usedThisMonthEur: used(m.id) })))
   })
 
   // Données du tableau de bord : protégées par le mot de passe admin si le proxy est ouvert au réseau
@@ -349,7 +365,7 @@ export function createProxy(
         allowedDomains: r?.allowed_domains ?? []
       }
     }))
-    res.json({ agents: list, pending: [...pending.values()], eurPerSat: EUR_PER_SAT, anchors: anchorLog.all() })
+    res.json({ agents: list, pending: requests.open().map(requestView), eurPerSat: EUR_PER_SAT, anchors: anchorLog.all() })
   })
   app.get('/v1/ledger/verify', async (_req, res) => res.json(await ledger.verify()))
 
@@ -453,12 +469,23 @@ export function createProxy(
   })
   // Validation depuis le tableau de bord (réservée à l'administrateur)
   // Sur cet ordinateur seulement (proxy non exposé), pas besoin du mot de passe pour décider
-  app.post('/v1/admin/approvals/:id', (req, res, next) => EXPOSED ? requireAdmin(req, res, next) : next(), (req, res) => {
-    const decide = dashboardDecide.get(Number(req.params.id))
-    if (!decide) return res.status(404).json({ error: 'This request is no longer waiting (already decided or expired)' })
+  app.post('/v1/admin/approvals/:id', (req, res, next) => EXPOSED ? requireAdmin(req, res, next) : next(), async (req, res) => {
+    const r = requests.get(req.params.id)
+    if (!r || r.status !== 'pending') return res.status(404).json({ error: 'This request is no longer waiting (already decided or expired)' })
     const approved = req.body?.approve === true
-    decide({ status: approved ? 'approved' : 'rejected', by: `${who(req)} (dashboard)` })
-    console.log(`${approved ? '✅' : '❌'} ${who(req)} ${approved ? 'approved' : 'rejected'} request #${req.params.id} on the dashboard`)
+    const message = await engine.decide(r.id, approved, `${who(req)} (dashboard)`)
+    res.json({ ok: true, message })
+  })
+
+  // Mandats en cours (administration) : liste et révocation
+  admin.get('/mandates', (_req, res) => {
+    const used = engine.usedByMandate(ledger.allSync())
+    res.json(mandates.list().slice().reverse().map(m => ({ ...m, active: !m.revokedAt && m.validUntil > new Date().toISOString(), usedThisMonthEur: used(m.id) })))
+  })
+  admin.delete('/mandates/:id', async (req, res) => {
+    const m = mandates.revoke(req.params.id, who(req))
+    if (!m) return res.status(404).json({ error: 'Unknown or already revoked mandate' })
+    await logChange(req, m.agentId, `Mandate ${m.id} revoked (${m.domain})`)
     res.json({ ok: true })
   })
 

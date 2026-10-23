@@ -39,6 +39,7 @@ export interface BudgetStore {
   tryReserve(agentId: string, sats: number, limits: BudgetLimits): Promise<string | undefined>
   release(agentId: string, sats: number, category?: string): Promise<void>
   reset(agentId: string): Promise<void> // remet le compteur du jour à zéro (administration)
+  credit(agentId: string, sats: number, category: string | undefined, originalTs: string): void // remboursement
 }
 
 // Garde les clés et signe. Hackathon : variable d'environnement. Entreprise : HashiCorp Vault.
@@ -55,12 +56,15 @@ export interface LedgerEntry {
   amountSats: number
   amountEur: number
   purpose?: string
-  decision: Decision['kind'] | 'error' | 'admin' // 'admin' = modification des règles
+  decision: Decision['kind'] | 'error' | 'admin' | 'refund' // 'admin' = modification des règles ; 'refund' = remboursement reçu
   reason?: string
   txid?: string
   order?: OrderInfo   // ce qui a été acheté (marchand, catégorie, articles, livraison)
   approvedBy?: string // qui a validé (Vier-Augen-Prinzip)
   action?: string     // pour les entrées 'admin' : type de modification (ex. 'budget_reset')
+  requestId?: string  // demande de validation liée (R-…)
+  mandateId?: string  // paiement couvert par un mandat (M-…)
+  refundOf?: string   // pour un remboursement : la transaction du paiement remboursé
   prevHash: string
   hash: string
 }
@@ -72,8 +76,4 @@ export interface Ledger {
   verify(): Promise<{ ok: boolean; brokenAt?: number }>
 }
 
-// Demande l'accord d'un humain. Hackathon : Telegram. Entreprise : Microsoft Teams.
-export interface ApprovalChannel {
-  // signal : déclenché si la décision a été prise ailleurs (tableau de bord) ; signal.reason = cette décision
-  requestApproval(req: PaymentRequest, reason: string, signal?: AbortSignal): Promise<{ status: 'approved' | 'rejected' | 'timeout'; by?: string }>
-}
+// Demande l'accord d'un humain : voir approval.ts (ApprovalNotifier) et requests.ts (demandes enregistrées).

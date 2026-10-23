@@ -51,6 +51,16 @@ export interface PaymentPayload {
   x402Version: 2
   accepted: PaymentRequirements
   payload: { lockingScriptHex: string; rawtx: string }
+  // Où renvoyer l'argent en cas d'annulation (adresse du payeur)
+  extensions?: { refundTo?: string }
+}
+
+// Remboursement annoncé par le vendeur (en-tête PAYMENT-REFUND) : la transaction qui rend l'argent
+export interface RefundNotice {
+  paymentTxid: string
+  refundTxid: string
+  rawtx: string
+  sats: number
 }
 
 export interface PaymentResponse {

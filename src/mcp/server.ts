@@ -104,7 +104,7 @@ async function proxy(apiKey: string, path: string, body?: unknown) {
   const text = await res.text()
   let json: any
   try { json = JSON.parse(text) } catch { json = undefined }
-  return { status: res.status, ok: res.ok, paidSats: Number(res.headers.get('X-Paid-Sats') ?? 0), json, text }
+  return { status: res.status, ok: res.ok, paidSats: Number(res.headers.get('X-Paid-Sats') ?? 0), refundedSats: Number(res.headers.get('X-Refunded-Sats') ?? 0), json, text }
 }
 
 const result = (text: string, data?: Record<string, unknown>, isError = false) => ({
@@ -128,8 +128,11 @@ function buildServer(apiKey: string, ctx: Ctx = { ws: WORKSPACE }) {
       'AgentGetPay lets you buy paid online services (HTTP 402, paid in BSV) within your company\'s rules. ' +
       'Use these tools, never a web browser, for any paid service: payments must go through the company\'s spend control. ' +
       'Call list_services to see the approved services and their addresses. Before buying, call check_budget, then get_price for each paid call. Always give a clear purpose: it is ' +
-      'stored in the audit log. Payments above the approval threshold wait for a human to approve them on their ' +
-      'phone or on the dashboard (up to 2 minutes). If a payment is refused, explain the reason to the user instead of retrying. ' +
+      'stored in the audit log. Payments above the approval threshold need a human: they may approve within seconds or days. ' +
+      'If the answer is not immediate you get a request id (R-…): do not retry, continue with other work, and use check_request later; ' +
+      'the purchase is made automatically once approved. For recurring purchases (subscriptions), ask once with request_mandate. ' +
+      'To cancel an order, call the merchant\'s cancel endpoint with pay_and_fetch: refunds come back to the company automatically. ' +
+      'If a payment is refused, explain the reason to the user instead of retrying. ' +
       'To send a file, use {"$file": "name.pdf"} in the body; received files are saved in out/. ' +
       (links
         ? 'You run remotely and cannot read files from the user\'s computer or from the chat. When the user wants a file of theirs processed, ' +
@@ -171,6 +174,7 @@ function buildServer(apiKey: string, ctx: Ctx = { ws: WORKSPACE }) {
       ...(m.rules?.shipping_addresses ? [`Goods can only be delivered to: ${m.rules.shipping_addresses.map((a: any) => `${a.street}, ${a.postalCode} ${a.city}, ${a.country}`).join(' | ')}`] : []),
       `Max per payment: ${eur(m.rules?.max_per_payment_eur ?? 0)} · human approval above ${eur(m.rules?.approval_above_eur ?? 0)}`,
       `Allowed domains: ${(m.rules?.allowed_domains ?? []).join(', ')}`,
+      ...(m.mandates?.length ? [`Active standing approvals: ${m.mandates.map((x: any) => `${x.id} ${x.domain}${x.category ? ` ${x.category}` : ''} up to ${eur(x.maxEurPerMonth)}/month (${eur(x.usedThisMonthEur)} used)`).join('; ')}`] : []),
       'Recent operations:',
       ...m.recent.map((e: any) => `- ${new Date(e.time).toLocaleString('en-GB', { timeZone: 'Europe/Berlin', dateStyle: 'short', timeStyle: 'short' })} ${e.decision} ${eur(e.amountEur)} ${e.url}${e.reason ? ` (${e.reason})` : ''}`)
     ]
@@ -195,9 +199,25 @@ function buildServer(apiKey: string, ctx: Ctx = { ws: WORKSPACE }) {
     return result(`${q.description ?? url}: ${q.priceSats} sats (${eur(q.priceEur)}). Your rules: ${verdict}.`, q)
   })
 
+  // Présente la réponse d'un service à l'assistant (fichiers enregistrés, liens de téléchargement)
+  const present = async (r: Awaited<ReturnType<typeof proxy>>, prefix = '') => {
+    const data = r.json !== undefined ? await extractFiles(ws, r.json) : undefined
+    const head = prefix + (r.paidSats ? `Paid ${r.paidSats} sats. ` : 'No payment needed. ') +
+      (r.refundedSats ? `Refund received: ${r.refundedSats} sats were paid back to the company wallet. ` : '')
+    const files = JSON.stringify(data ?? '').match(/"\$file":"[^"]+"/g)?.map(f => f.slice(9, -1)) ?? []
+    const downloads = files.map(f => ({ file: f, url: download(f) })).filter(d => d.url)
+    const text = head + (files.length ? `Files saved: ${files.join(', ')}. ` : '') +
+      (downloads.length ? `\nDownload links for the user (valid 24 h):\n${downloads.map(d => `- ${d.file}: ${d.url}`).join('\n')}` : '') +
+      '\n' + short(data !== undefined ? JSON.stringify(data, null, 2) : r.text)
+    return result(text, { paidSats: r.paidSats, status: r.status, ...(r.refundedSats ? { refundedSats: r.refundedSats } : {}), ...(downloads.length ? { downloads } : {}), ...(data && typeof data === 'object' && !Array.isArray(data) ? { response: data } : {}) })
+  }
+  const pendingText = (j: any) => `Waiting for human approval: request ${j.requestId ?? j.id} (${j.reason}). A person may answer in minutes or in days (open until ${j.expiresAt}). ` +
+    'Do NOT retry this purchase. Tell the user it is waiting for approval and continue with other tasks. ' +
+    'When it is approved, the purchase is made automatically; call check_request later to get the result.'
+
   server.registerTool('pay_and_fetch', {
     title: 'Pay and fetch',
-    description: 'Calls a service. If it asks for payment (HTTP 402), the company proxy checks your rules, may ask a human to approve, pays in BSV and returns the result. Free services are simply called. Every call is recorded in the audit log. Always use this tool for paid services, never a web browser: company payments must go through this spend control.',
+    description: 'Calls a service. If it asks for payment (HTTP 402), the company proxy checks your rules, may ask a human to approve, pays in BSV and returns the result. Free services are simply called. Every call is recorded in the audit log. Always use this tool for paid services, never a web browser: company payments must go through this spend control. If a human must approve, you get a request id at once: continue with other work and use check_request later.',
     inputSchema: {
       url: z.string().url().describe('Full URL of the service'),
       method: z.enum(['GET', 'POST', 'PUT', 'DELETE']).default('GET'),
@@ -209,19 +229,65 @@ function buildServer(apiKey: string, ctx: Ctx = { ws: WORKSPACE }) {
     let payload: unknown
     try { payload = body === undefined ? undefined : await attachFiles(ws, body) } catch (e) { return result((e as Error).message, undefined, true) }
     log(`${method} ${url} — ${purpose}`)
-    const r = await proxy(apiKey, '/v1/fetch', { url, method, body: payload, purpose })
+    // On attend une validation 20 s au plus : au-delà, la demande reste ouverte et l'assistant continue
+    const r = await proxy(apiKey, '/v1/fetch', { url, method, body: payload, purpose, waitSeconds: 20 })
+    if (r.status === 202 && r.json?.decision === 'pending_approval') return result(pendingText(r.json), { status: 202, ...r.json })
     if (!r.ok) {
       const reason = r.json?.reason ?? r.json?.error ?? `HTTP ${r.status}`
       return result(`Not done: ${reason}`, { status: r.status, decision: r.json?.decision, reason }, true)
     }
-    const data = r.json !== undefined ? await extractFiles(ws, r.json) : undefined
-    const head = r.paidSats ? `Paid ${r.paidSats} sats. ` : 'No payment needed. '
-    const files = JSON.stringify(data ?? '').match(/"\$file":"[^"]+"/g)?.map(f => f.slice(9, -1)) ?? []
-    const downloads = files.map(f => ({ file: f, url: download(f) })).filter(d => d.url)
-    const text = head + (files.length ? `Files saved: ${files.join(', ')}. ` : '') +
-      (downloads.length ? `\nDownload links for the user (valid 24 h):\n${downloads.map(d => `- ${d.file}: ${d.url}`).join('\n')}` : '') +
-      '\n' + short(data !== undefined ? JSON.stringify(data, null, 2) : r.text)
-    return result(text, { paidSats: r.paidSats, status: r.status, ...(downloads.length ? { downloads } : {}), ...(data && typeof data === 'object' && !Array.isArray(data) ? { response: data } : {}) })
+    return present(r)
+  })
+
+  server.registerTool('check_request', {
+    title: 'Check an approval request',
+    description: 'Shows the status of a purchase or mandate that was waiting for human approval. If the purchase was approved and made, returns its result (like pay_and_fetch).',
+    inputSchema: { request_id: z.string().regex(/^R-[A-Z0-9]{6}$/).describe('The request id, e.g. R-7K2Q9D') },
+    annotations: { readOnlyHint: true, openWorldHint: false }
+  }, async ({ request_id }) => {
+    const r = await proxy(apiKey, `/v1/requests/${request_id}`)
+    if (!r.ok) return result(`Cannot read ${request_id}: ${r.json?.error ?? r.status}`, undefined, true)
+    const q = r.json
+    if (q.status === 'pending') return result(pendingText(q), q)
+    if (q.status === 'rejected') return result(`${q.id} was rejected by ${q.decidedBy}. Do not buy it another way; tell the user.`, q)
+    if (q.status === 'expired') return result(`${q.id} expired: nobody approved it in time. Ask the user before trying again.`, q)
+    if (q.status === 'approved') return result(`${q.id} was approved by ${q.decidedBy} and is being executed. Check again in a moment.`, q)
+    if (q.kind === 'mandate') return result(q.status === 'completed' ? `Mandate ${q.result?.mandateId} is active (approved by ${q.decidedBy}): matching payments no longer wait for approval.` : `Mandate request failed: ${q.result?.error}`, q, q.status !== 'completed')
+    if (q.status === 'failed' && !q.result?.status) return result(`${q.id} was approved but not executed: ${q.result?.error}`, q, true)
+    const out = await proxy(apiKey, `/v1/requests/${request_id}/result`)
+    if (q.status === 'failed') return result(`${q.id} was approved by ${q.decidedBy}, but not completed: ${q.result?.error ?? out.json?.reason ?? out.status}`, q, true)
+    return present(out, `${q.id} was approved by ${q.decidedBy} and executed. `)
+  })
+
+  server.registerTool('list_requests', {
+    title: 'List approval requests',
+    description: 'Lists your recent purchases and mandates that needed human approval, with their status.',
+    annotations: { readOnlyHint: true, openWorldHint: false }
+  }, async () => {
+    const r = await proxy(apiKey, '/v1/requests')
+    if (!r.ok) return result(`Cannot list requests: ${r.json?.error ?? r.status}`, undefined, true)
+    const lines = (r.json as any[]).map(q => `- ${q.id} ${q.status}${q.kind === 'mandate' ? ` mandate ${q.mandate?.domain} ${eur(q.mandate?.maxEurPerMonth)}/month` : ` ${eur(q.amountEur ?? 0)} ${q.order?.merchant ?? q.url}`}${q.decidedBy ? ` (by ${q.decidedBy})` : ''}`)
+    return result(lines.length ? lines.join('\n') : 'No approval requests.', { requests: r.json })
+  })
+
+  server.registerTool('request_mandate', {
+    title: 'Ask for a standing approval',
+    description: 'For recurring purchases (a monthly subscription, an API billed every month): asks a human ONCE to approve payments to one merchant up to a monthly amount. Once approved, matching payments no longer wait for approval (budgets and other rules still apply).',
+    inputSchema: {
+      domain: z.string().describe('Merchant domain, e.g. shop.example.com (must be one of your allowed domains)'),
+      category: z.string().optional().describe('Purchase category covered, e.g. software.subscription'),
+      max_eur_per_month: z.number().positive().describe('Maximum covered per month, in euros'),
+      months: z.number().int().min(1).max(24).default(12).describe('How long the approval lasts'),
+      purpose: z.string().min(5).max(200).describe('Why this recurring purchase is needed')
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false }
+  }, async ({ domain, category, max_eur_per_month, months, purpose }) => {
+    const r = await proxy(apiKey, '/v1/mandates', { domain, category, maxEurPerMonth: max_eur_per_month, months, purpose, waitSeconds: 20 })
+    if (r.status >= 400) return result(`Not requested: ${r.json?.error ?? r.status}`, undefined, true)
+    const q = r.json
+    if (q.status === 'pending') return result(`Standing approval requested: ${q.id}. A human must approve it (open until ${q.expiresAt}). Continue with other work and use check_request later.`, q)
+    if (q.status === 'completed') return result(`Approved by ${q.decidedBy}: mandate ${q.result?.mandateId} is active.`, q)
+    return result(`Mandate request ${q.status}${q.decidedBy ? ` by ${q.decidedBy}` : ''}.`, q, true)
   })
 
   server.registerTool('list_workspace_files', {

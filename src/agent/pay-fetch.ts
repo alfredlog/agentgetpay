@@ -81,7 +81,8 @@ export async function payFetch(url: string, init: RequestInit, opts: PayFetchOpt
     const payment: PaymentPayload = {
       x402Version: 2,
       accepted: req,
-      payload: { lockingScriptHex: req.extra.lockingScriptHex, rawtx: tx.toHex() }
+      payload: { lockingScriptHex: req.extra.lockingScriptHex, rawtx: tx.toHex() },
+      extensions: { refundTo: myAddress } // en cas d'annulation, le vendeur rembourse ici
     }
     const headers = new Headers(init.headers)
     headers.set('PAYMENT-SIGNATURE', encode(payment))
