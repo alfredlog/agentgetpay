@@ -128,6 +128,17 @@ For each agent you can change the daily budget, the maximum per payment, the app
 
 Every change is written to the audit log with the name of the person who made it, and sealed on BSV like the payments. New API keys are shown once and only their hash is stored.
 
+### Purchase policy (services, travel, goods)
+
+Merchants can describe what they sell in the 402 offer (`extensions.order`: merchant, category, items with unit prices, delivery address). AgentGetPay then applies the company's purchase policy before paying, like a purchasing department would:
+
+- **Daily and monthly budgets** per agent.
+- **Purchase categories** (`travel.hotel`, `office.supplies`, `software.subscription`…): if an agent has categories, it can only buy in those. Each category can have a **maximum price per unit** (e.g. €150 per hotel night), a **monthly budget** and its own **approval threshold**. A rule on `travel` also covers `travel.hotel`.
+- **Delivery addresses**: goods can only be shipped to the company's addresses (written variants such as "Leopoldstr." / "Leopoldstraße" or "Muenchen" / "München" are recognised).
+- The order (merchant, category, items) is stored in the audit log and shown on the dashboard.
+
+Everything is set on the admin page under **Purchase rules**. The demo seller (`npm run seller`) includes three fictional shops that describe their orders: a hotel (`/api/hotel/book`), office supplies (`/api/office/order`) and a software subscription (`/api/software/subscribe`). Test: `npm run test:purchase`.
+
 ### Accounting export (DATEV)
 
 German accountants work in DATEV. Every paid entry becomes one booking, with the audit log entry as voucher number (`AGP-<n>`) and the BSV transaction as reference.
@@ -174,6 +185,7 @@ Daily spending is rebuilt from the audit log when the proxy starts, so restartin
 | `npm run mcp:config` | Print the MCP configuration to paste into an assistant |
 | `npm run test:oauth` | Test the OAuth connection of assistants, offline |
 | `npm run test:files` | Test upload and download links for remote assistants, offline |
+| `npm run test:purchase` | Test the purchase policy (budgets, categories, delivery addresses), offline |
 | `npm run test:local`, `npm run test:proxy` | Offline tests with a fake wallet |
 
 Code comments are in French.

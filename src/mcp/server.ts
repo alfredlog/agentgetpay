@@ -166,7 +166,9 @@ function buildServer(apiKey: string, ctx: Ctx = { ws: WORKSPACE }) {
     const m = r.json
     const lines = [
       `Agent: ${m.agentId}${m.active ? '' : ' (SUSPENDED: every payment will be refused)'}`,
-      `Spent today: ${eur(m.spentEur)} of ${eur(m.rules?.daily_budget_eur ?? 0)}, remaining ${eur(m.remainingEur)}`,
+      `Spent today: ${eur(m.spentEur)} of ${eur(m.rules?.daily_budget_eur ?? 0)}${m.rules?.monthly_budget_eur !== undefined ? ` · this month: ${eur(m.spentMonthEur)} of ${eur(m.rules.monthly_budget_eur)}` : ''} · you can still spend ${eur(m.remainingEur)} today`,
+      ...(m.categories ? [`Allowed purchase categories (others are refused): ${Object.entries(m.categories).map(([k, c]: [string, any]) => `${k}${c.max_unit_price_eur !== undefined ? ` max ${eur(c.max_unit_price_eur)}/unit` : ''}${c.monthly_budget_eur !== undefined ? `, ${eur(c.spentMonthEur)} of ${eur(c.monthly_budget_eur)} this month` : ''}${c.approval_above_eur !== undefined ? `, approval above ${eur(c.approval_above_eur)}` : ''}`).join('; ')}`] : []),
+      ...(m.rules?.shipping_addresses ? [`Goods can only be delivered to: ${m.rules.shipping_addresses.map((a: any) => `${a.street}, ${a.postalCode} ${a.city}, ${a.country}`).join(' | ')}`] : []),
       `Max per payment: ${eur(m.rules?.max_per_payment_eur ?? 0)} · human approval above ${eur(m.rules?.approval_above_eur ?? 0)}`,
       `Allowed domains: ${(m.rules?.allowed_domains ?? []).join(', ')}`,
       'Recent operations:',

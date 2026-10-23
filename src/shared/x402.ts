@@ -18,10 +18,33 @@ export interface PaymentRequirements {
   }
 }
 
+// Ce que le marchand vend, décrit dans l'offre 402 (extension facultative).
+// Le proxy s'en sert pour appliquer les règles d'achat : catégorie, prix unitaire, adresse de livraison.
+export interface OrderItem {
+  name: string
+  quantity: number
+  unitPriceSats: number
+  unit?: string // ex. "night" (nuit d'hôtel), "item", "month"
+}
+export interface ShippingAddress {
+  name?: string
+  street: string
+  postalCode: string
+  city: string
+  country: string // code ISO, ex. "DE"
+}
+export interface OrderInfo {
+  merchant: string // nom du marchand, ex. "Alpenblick Hotel"
+  category: string // ex. "travel.hotel", "office.supplies", "software.subscription"
+  items: OrderItem[]
+  shipTo?: ShippingAddress
+}
+
 export interface PaymentRequired {
   x402Version: 2
   resource: { url: string; method: string; description?: string }
   accepts: PaymentRequirements[]
+  extensions?: { order?: OrderInfo }
 }
 
 export interface PaymentPayload {

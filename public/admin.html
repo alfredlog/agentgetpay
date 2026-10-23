@@ -24,7 +24,7 @@
   h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 28px 0 10px; font-weight: 600; }
   a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 400px), 1fr)); gap: 12px; }
   .top { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 12px; }
   .name { font-weight: 600; font-size: 16px; }
   .pill { padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
@@ -57,6 +57,16 @@
   .key.pairbox { word-break: normal; } .key.pairbox code { word-break: break-all; }
   code.pair { font-size: 22px; letter-spacing: .12em; font-weight: 700; }
   .hidden { display: none; }
+  details.rules { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin: 2px 0 12px; }
+  details.rules summary { cursor: pointer; font-size: 13px; font-weight: 600; }
+  details.rules .hint { margin: 6px 0; font-size: 12px; } details.rules code { font-size: 12px; }
+  .sub { font-size: 12px; font-weight: 600; margin: 10px 0 4px; }
+  .cat, .addr { display: grid; gap: 6px; align-items: center; margin-bottom: 6px; }
+  .cat { grid-template-columns: 1.6fr 1fr 1fr 1fr 28px; } .addr { grid-template-columns: 2fr 1fr 1.2fr 46px 28px; }
+  .cat.head span { font-size: 11px; color: var(--muted); }
+  .cat input, .addr input { margin-top: 0; padding: 5px 7px; font-size: 13px; }
+  button.x { padding: 4px 0; width: 28px; font-size: 12px; }
+  details.rules > button { font-size: 12px; padding: 4px 10px; }
   @media (max-width: 520px) { .row { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -184,20 +194,47 @@ $('v-btn').onclick = async () => {
 }
 $('v-name').oninput = () => { $('v-msg').textContent = '' }
 
+const catRow = (k = '', v = {}) => `<div class="cat" data-cat>
+  <input data-k="name" placeholder="travel.hotel" value="${esc(k)}">
+  <input data-k="max_unit_price_eur" type="number" step="0.01" min="0.01" placeholder="—" value="${v.max_unit_price_eur ?? ''}">
+  <input data-k="monthly_budget_eur" type="number" step="0.01" min="0.01" placeholder="—" value="${v.monthly_budget_eur ?? ''}">
+  <input data-k="approval_above_eur" type="number" step="0.01" min="0" placeholder="—" value="${v.approval_above_eur ?? ''}">
+  <button type="button" class="x" data-remove title="Remove">✕</button></div>`
+const addrRow = (a = {}) => `<div class="addr" data-addr>
+  <input data-k="street" placeholder="Street and number" value="${esc(a.street ?? '')}">
+  <input data-k="postalCode" placeholder="Postcode" value="${esc(a.postalCode ?? '')}">
+  <input data-k="city" placeholder="City" value="${esc(a.city ?? '')}">
+  <input data-k="country" placeholder="DE" maxlength="2" value="${esc(a.country ?? '')}">
+  <button type="button" class="x" data-remove title="Remove">✕</button></div>`
+
 function card(a) {
   const r = a.rules || { daily_budget_eur: 0, max_per_payment_eur: 0, approval_above_eur: 0, allowed_domains: [] }
   const pct = r.daily_budget_eur ? Math.min(100, a.spentEur / r.daily_budget_eur * 100) : 0
   return `<div class="card" id="c-${a.id}">
     <div class="top"><span class="name">${esc(a.id)}</span>
       <span class="pill ${a.active ? 'ok' : 'bad'}">${a.active ? 'Active' : 'Suspended'}</span></div>
-    <div class="meta">${eur(a.spentEur)} spent today${a.keyHint ? ` · API key …${esc(a.keyHint)}` : ''}</div>
+    <div class="meta">${eur(a.spentEur)} spent today · ${eur(a.spentMonthEur || 0)} this month${a.keyHint ? ` · API key …${esc(a.keyHint)}` : ''}</div>
     <div class="bar ${pct >= 100 ? 'full' : ''}"><div style="width:${pct}%"></div></div>
     <div class="row">
       <label>Daily budget €<input data-f="daily_budget_eur" type="number" step="0.01" min="0.01" value="${r.daily_budget_eur}"></label>
       <label>Max per payment €<input data-f="max_per_payment_eur" type="number" step="0.01" min="0.01" value="${r.max_per_payment_eur}"></label>
       <label>Approval above €<input data-f="approval_above_eur" type="number" step="0.01" min="0" value="${r.approval_above_eur}"></label>
     </div>
+    <div class="row">
+      <label>Monthly budget €<input data-f="monthly_budget_eur" type="number" step="0.01" min="0.01" placeholder="no limit" value="${r.monthly_budget_eur ?? ''}"></label>
+    </div>
     <label>Allowed domains (comma-separated)<input data-f="allowed_domains" value="${esc(r.allowed_domains.join(', '))}"></label>
+    <details class="rules" ${r.categories || r.shipping_addresses ? 'open' : ''}>
+      <summary>Purchase rules ${r.categories ? `· ${Object.keys(r.categories).length} categories` : '· all categories allowed'}${r.shipping_addresses ? ` · ${r.shipping_addresses.length} delivery address${r.shipping_addresses.length > 1 ? 'es' : ''}` : ''}</summary>
+      <div class="hint">Applied when a merchant describes what it sells. If you list categories, only those can be bought. Category <code>travel</code> also covers <code>travel.hotel</code>.</div>
+      <div class="sub">Categories</div>
+      <div class="cat head"><span>Category</span><span>Max per unit €</span><span>Per month €</span><span>Approval above €</span><span></span></div>
+      <div data-cats>${Object.entries(r.categories || {}).map(([k, v]) => catRow(k, v)).join('')}</div>
+      <button type="button" data-a="add-cat">+ Category</button>
+      <div class="sub">Delivery addresses <span class="hint">(goods can only be shipped here)</span></div>
+      <div data-addrs>${(r.shipping_addresses || []).map(addrRow).join('')}</div>
+      <button type="button" data-a="add-addr">+ Address</button>
+    </details>
     <div class="actions">
       <button class="primary" data-a="save">Save rules</button>
       <button data-a="reset">Reset today's spending</button>
@@ -225,11 +262,24 @@ function wire(a) {
   c.querySelector('[data-a="save"]').onclick = e => run(e.target, async () => {
     for (const f of ['daily_budget_eur', 'max_per_payment_eur', 'approval_above_eur'])
       if (val(f) === '') throw new Error('Fill in every amount')
+    const fields = row => Object.fromEntries([...row.querySelectorAll('[data-k]')].map(i => [i.dataset.k, i.value.trim()]))
+    const categories = {}
+    for (const row of c.querySelectorAll('[data-cat]')) {
+      const { name, ...v } = fields(row)
+      if (!name) { if (Object.values(v).some(Boolean)) throw new Error('Give each category a name, e.g. travel.hotel'); continue }
+      categories[name] = v
+    }
+    const shipping_addresses = [...c.querySelectorAll('[data-addr]')].map(fields).filter(x => Object.values(x).some(Boolean))
     const r = await api('/agents/' + a.id, 'PUT', { rules: {
       daily_budget_eur: val('daily_budget_eur'), max_per_payment_eur: val('max_per_payment_eur'),
-      approval_above_eur: val('approval_above_eur'), allowed_domains: val('allowed_domains') } })
+      approval_above_eur: val('approval_above_eur'), monthly_budget_eur: val('monthly_budget_eur'),
+      allowed_domains: val('allowed_domains'), categories, shipping_addresses } })
     msg(r.message === 'No change' ? 'Nothing changed' : `Saved: ${r.message}`)
   })
+  // Lignes de catégories et d'adresses : ajouter / supprimer
+  c.querySelector('[data-a="add-cat"]').onclick = () => c.querySelector('[data-cats]').insertAdjacentHTML('beforeend', catRow())
+  c.querySelector('[data-a="add-addr"]').onclick = () => c.querySelector('[data-addrs]').insertAdjacentHTML('beforeend', addrRow())
+  c.querySelector('details.rules').onclick = e => { if (e.target.matches('[data-remove]')) { e.target.parentElement.remove(); msg('') } }
   c.querySelector('[data-a="reset"]').onclick = e => run(e.target, async () => {
     await api(`/agents/${a.id}/reset-budget`, 'POST'); await load(); $('c-' + a.id).querySelector('[data-msg]').textContent = 'Spending reset to €0.00'
   })
