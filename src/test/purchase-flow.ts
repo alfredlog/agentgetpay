@@ -64,7 +64,7 @@ try {
   r = await buy('/api/hotel/book', { room: 'standard', nights: 1 })
   check(r.status === 403 && /Monthly travel budget exceeded/.test(r.json.reason), `Hotel: 3rd night refused, travel budget of €300/month reached (${r.json.reason})`)
 
-  // Fournitures
+  // Office supplies
   r = await buy('/api/office/order', { items: [{ sku: 'pens', quantity: 2 }], shipTo: { street: 'Leopoldstr. 1', postalCode: '80802', city: 'Muenchen', country: 'de' } })
   check(r.status === 200 && /^BW-/.test(r.json.order), 'Office: pens shipped to the company address (written differently) are ordered')
   r = await buy('/api/office/order', { items: [{ sku: 'pens', quantity: 1 }], shipTo: { street: 'Hauptstraße 5', postalCode: '10115', city: 'Berlin', country: 'DE' } })
