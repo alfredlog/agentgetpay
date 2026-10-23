@@ -1,4 +1,4 @@
-// Configuration pm2 : lance le proxy et le serveur MCP, et les relance s'ils s'arrêtent.
+// Configuration pm2 : lance le proxy, le serveur MCP et la place de marché de démo, et les relance s'ils s'arrêtent.
 // Usage sur le VPS : pm2 start deploy/ecosystem.config.cjs && pm2 save
 const path = require('node:path')
 const root = path.join(__dirname, '..')
@@ -22,6 +22,16 @@ module.exports = {
       args: 'src/mcp/server.ts',
       interpreter: 'node',
       env: { MCP_TRANSPORT: 'http' },
+      max_memory_restart: '200M',
+      time: true
+    },
+    {
+      // Place de marché de démo (boutiques fictives payées en 402) — facultative
+      name: 'agentgetpay-market',
+      cwd: root,
+      script: tsx,
+      args: 'src/market/server.ts',
+      interpreter: 'node',
       max_memory_restart: '200M',
       time: true
     }
