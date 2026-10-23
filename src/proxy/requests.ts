@@ -1,51 +1,51 @@
-// Demandes qui attendent une décision humaine : un achat au-dessus du seuil, ou un mandat (achats récurrents).
+// Requests waiting for a human decision: a purchase above the threshold, or a mandate (recurring purchases).
 //
-// Une validation peut prendre des heures ou des jours : la demande est donc ENREGISTRÉE (elle survit à un
-// redémarrage), l'agent continue son travail, et dès qu'un humain valide, le proxy exécute l'achat tout seul.
-// L'agent récupère ensuite le résultat (check_request), ou reçoit un appel sur son adresse de rappel.
+// An approval can take hours or days: the request is therefore STORED (it survives a
+// restart), the agent carries on with its work, and as soon as a human approves, the proxy executes the purchase by itself.
+// The agent then fetches the result (check_request), or receives a call on its callback address.
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import type { OrderInfo } from '../shared/x402.js'
 
 export type RequestStatus =
-  | 'pending'    // en attente d'une décision
-  | 'approved'   // validée, exécution en cours
-  | 'completed'  // validée et exécutée (achat payé, ou mandat créé)
-  | 'rejected'   // refusée par un humain
-  | 'expired'    // pas de réponse à temps
-  | 'failed'     // validée, mais l'exécution a échoué (prix augmenté, budget épuisé, service en panne…)
+  | 'pending'    // waiting for a decision
+  | 'approved'   // approved, execution in progress
+  | 'completed'  // approved and executed (purchase paid, or mandate created)
+  | 'rejected'   // rejected by a human
+  | 'expired'    // no answer in time
+  | 'failed'     // approved, but execution failed (price increased, budget exhausted, service down…)
 
 export interface MandateTerms {
-  domain: string            // marchand (domaine) concerné
-  category?: string         // catégorie couverte, ex. "software.subscription"
-  maxEurPerMonth: number    // plafond mensuel couvert par le mandat
-  months: number            // durée
+  domain: string            // merchant (domain) concerned
+  category?: string         // category covered, e.g. "software.subscription"
+  maxEurPerMonth: number    // monthly limit covered by the mandate
+  months: number            // duration
 }
 
 export interface StoredRequest {
-  id: string                 // ex. "R-7K2Q9D"
+  id: string                 // e.g. "R-7K2Q9D"
   kind: 'payment' | 'mandate'
   agentId: string
   purpose?: string
-  reason: string             // pourquoi une validation est nécessaire
+  reason: string             // why an approval is needed
   createdAt: string
   expiresAt: string
   status: RequestStatus
   decidedBy?: string
   decidedAt?: string
-  // Achat
+  // Purchase
   url?: string
   method?: string
-  amountSats?: number        // montant validé : l'exécution ne paiera jamais plus
+  amountSats?: number        // approved amount: the execution will never pay more
   amountEur?: number
   order?: OrderInfo
-  callbackUrl?: string       // l'agent est prévenu ici quand la demande est terminée
-  // Mandat
+  callbackUrl?: string       // the agent is notified here when the request is finished
+  // Mandate
   mandate?: MandateTerms
-  // Résultat
+  // Result
   result?: { status: number; contentType: string; paidSats?: number; txid?: string; mandateId?: string; error?: string }
-  // Messages de validation envoyés (pour les mettre à jour : Telegram…)
+  // Approval messages sent (to update them later: Telegram…)
   notices?: Record<string, unknown>
 }
 
@@ -63,7 +63,7 @@ export class RequestStore {
   }
 
   private save() {
-    // On garde 1000 demandes terminées au maximum (les plus récentes)
+    // Keep at most 1000 finished requests (the most recent ones)
     const open = this.items.filter(r => r.status === 'pending' || r.status === 'approved')
     const done = this.items.filter(r => r.status !== 'pending' && r.status !== 'approved')
     if (done.length > 1000) for (const r of done.splice(0, done.length - 1000)) this.removeFiles(r.id)
@@ -80,7 +80,7 @@ export class RequestStore {
     let id = newId()
     while (this.get(id)) id = newId()
     const item: StoredRequest = { ...r, id, createdAt: new Date().toISOString(), status: 'pending' }
-    // Le contenu de la requête (parfois un PDF en base64) est gardé à part, pour l'exécution
+    // The request body (sometimes a PDF in base64) is kept separately, for the execution
     if (body !== undefined) writeFileSync(join(this.dir, `${id}.body`), JSON.stringify(body))
     this.items.push(item)
     this.save()

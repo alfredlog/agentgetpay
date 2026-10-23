@@ -1,5 +1,5 @@
-// Clés en variable d'environnement : OK pour le hackathon, jamais en production.
-// Version entreprise : HashiCorp Vault, où la clé ne quitte jamais le coffre.
+// Keys in an environment variable: fine for the hackathon, never in production.
+// Enterprise version: HashiCorp Vault, where the key never leaves the vault.
 import { PrivateKey, P2PKH } from '@bsv/sdk'
 import { KeyStore } from './types.js'
 
@@ -8,7 +8,7 @@ export class EnvKeyStore implements KeyStore {
   constructor(wif: string) {
     this.key = PrivateKey.fromWif(wif)
   }
-  // Pour la démo, tous les agents partagent le portefeuille de l'entreprise.
+  // For the demo, all agents share the company wallet.
   address(_agentId: string) {
     return this.key.toAddress('testnet')
   }

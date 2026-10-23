@@ -1,5 +1,5 @@
-// Le côté AGENT : un fetch() qui sait payer automatiquement une réponse 402.
-// À l'étape 3, ce code deviendra le Payment proxy, avec le moteur de règles branché sur `beforePay`.
+// The AGENT side: a fetch() that can pay a 402 response automatically.
+// In step 3 this code becomes the payment proxy, with the rules engine plugged into `beforePay`.
 import { Transaction, P2PKH, LockingScript } from '@bsv/sdk'
 import { NETWORK, PaymentRequired, PaymentPayload, PaymentResponse, OrderInfo, encode, decode } from '../shared/x402.js'
 import { UtxoProvider } from '../shared/utxo.js'
@@ -8,13 +8,13 @@ import { Mutex } from '../shared/mutex.js'
 export type Unlocker = ReturnType<P2PKH['unlock']>
 
 export interface PayFetchOptions {
-  address: string          // adresse testnet du payeur
-  unlocker: () => Unlocker // signe les entrées ; la clé reste dans le KeyStore
+  address: string          // testnet address of the payer
+  unlocker: () => Unlocker // signs the inputs; the key stays in the KeyStore
   utxos: UtxoProvider
-  maxSats?: number // garde-fou simple, remplacé par le moteur de règles à l'étape 3
+  maxSats?: number // simple safeguard, replaced by the rules engine in step 3
   beforePay?: (offer: { url: string; amount: number; payTo: string; order?: OrderInfo }) => Promise<boolean>
-  spendLock?: Mutex                // un seul paiement à la fois dépense le portefeuille
-  onSpent?: (tx: Transaction) => void // appelé dans le verrou quand le vendeur a accepté
+  spendLock?: Mutex                // only one payment at a time spends the wallet
+  onSpent?: (tx: Transaction) => void // called inside the lock once the seller has accepted
 }
 
 export interface PayFetchResult {
@@ -22,7 +22,7 @@ export interface PayFetchResult {
   paid?: { amount: number; txid: string; tx: Transaction }
 }
 
-// Description de commande envoyée par le marchand : on ne garde qu'une forme valide et de taille raisonnable
+// Order description sent by the merchant: only a valid, reasonably sized shape is kept
 export function validOrder(o: unknown): OrderInfo | undefined {
   const x = o as OrderInfo | undefined
   if (!x || typeof x !== 'object' || typeof x.merchant !== 'string' || typeof x.category !== 'string' || !Array.isArray(x.items)) return undefined
@@ -40,11 +40,11 @@ export function validOrder(o: unknown): OrderInfo | undefined {
 }
 
 export async function payFetch(url: string, init: RequestInit, opts: PayFetchOptions): Promise<PayFetchResult> {
-  // 1. Première tentative, sans payer
+  // 1. First attempt, without paying
   const first = await fetch(url, init)
   if (first.status !== 402) return { response: first }
 
-  // 2. Lire l'offre de paiement
+  // 2. Read the payment offer
   const header = first.headers.get('PAYMENT-REQUIRED')
   if (!header) throw new Error('402 without PAYMENT-REQUIRED header')
   const offer = decode<PaymentRequired>(header)
@@ -61,7 +61,7 @@ export async function payFetch(url: string, init: RequestInit, opts: PayFetchOpt
   }
 
   const spend = async () => {
-    // 3. Construire et signer la transaction (sans la diffuser : c'est le vendeur qui diffuse)
+    // 3. Build and sign the transaction (without broadcasting it: the seller broadcasts)
     const myAddress = opts.address
     const utxo = await opts.utxos.findUtxo(myAddress, amount + 50)
     if (!utxo) throw new Error('Not enough funds in the agent wallet')
@@ -77,12 +77,12 @@ export async function payFetch(url: string, init: RequestInit, opts: PayFetchOpt
     await tx.fee()
     await tx.sign()
 
-    // 4. Renvoyer la même requête avec la preuve de paiement
+    // 4. Send the same request again with the proof of payment
     const payment: PaymentPayload = {
       x402Version: 2,
       accepted: req,
       payload: { lockingScriptHex: req.extra.lockingScriptHex, rawtx: tx.toHex() },
-      extensions: { refundTo: myAddress } // en cas d'annulation, le vendeur rembourse ici
+      extensions: { refundTo: myAddress } // if the order is cancelled, the seller refunds here
     }
     const headers = new Headers(init.headers)
     headers.set('PAYMENT-SIGNATURE', encode(payment))
@@ -91,8 +91,8 @@ export async function payFetch(url: string, init: RequestInit, opts: PayFetchOpt
     const receiptHeader = second.headers.get('PAYMENT-RESPONSE')
     const receipt = receiptHeader ? decode<PaymentResponse>(receiptHeader) : undefined
     if (!second.ok || !receipt?.success) {
-      // Pas de reçu de paiement : c'est le service qui a refusé le travail (fichier invalide…),
-      // la transaction n'a pas été diffusée, donc rien n'a été payé.
+      // No payment receipt: the service refused the work (invalid file…),
+      // the transaction was not broadcast, so nothing was paid.
       if (!receipt) {
         const detail = await second.text().then(t => { try { return JSON.parse(t).error ?? t } catch { return t } })
         throw new Error(`Service error ${second.status}: ${String(detail).slice(0, 120)} (not charged)`)

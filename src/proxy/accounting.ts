@@ -1,7 +1,7 @@
-// Export comptable : transforme les paiements du journal d'audit en écritures pour DATEV,
-// le logiciel utilisé par presque tous les comptables allemands.
-// Format : "Buchungsstapel" (EXTF), version simplifiée avec les colonnes principales.
-// ⚠ À faire valider par un conseiller fiscal et par un import test dans DATEV avant un usage réel.
+// Accounting export: turns the payments of the audit log into bookings for DATEV,
+// the software used by almost every German accountant.
+// Format: "Buchungsstapel" (EXTF), simplified version with the main columns.
+// ⚠ Have it validated by a tax adviser and by a test import in DATEV before real use.
 import { readFileSync } from 'node:fs'
 import type { LedgerEntry } from './types.js'
 import type { Anchor } from './anchor.js'
@@ -10,15 +10,15 @@ export interface AccountingConfig {
   companyName: string
   consultantNumber: number // Beraternummer
   clientNumber: number     // Mandantennummer
-  chartOfAccounts: string  // SKR03 ou SKR04
-  expenseAccount: string   // compte de charges (Konto)
-  walletAccount: string    // compte du portefeuille (Gegenkonto)
+  chartOfAccounts: string  // SKR03 or SKR04
+  expenseAccount: string   // expense account (Konto)
+  walletAccount: string    // wallet account (Gegenkonto)
 }
 
 export const loadAccountingConfig = (path = 'config/accounting.json'): AccountingConfig =>
   JSON.parse(readFileSync(path, 'utf8'))
 
-// Interface : en version entreprise, on ajoute un exportateur XRechnung ou SAP sans toucher au reste
+// Interface: in the enterprise version, add an XRechnung or SAP exporter without touching the rest
 export interface AccountingExporter {
   exportMonth(entries: LedgerEntry[], month: string): { filename: string; content: string }
 }
@@ -34,12 +34,12 @@ const berlin = (ts: string | Date) => {
 const monthOf = (ts: string) => { const b = berlin(ts); return `${b.y}-${b.m}` }
 const ascii = (s: string) => s.normalize('NFKD').replace(/[^\x20-\x7E]/g, '').replace(/"/g, "'")
 const q = (s: string) => `"${s}"`
-const eur = (v: number) => v.toFixed(2).replace('.', ',') // DATEV : virgule décimale
+const eur = (v: number) => v.toFixed(2).replace('.', ',') // DATEV: decimal comma
 
-// Seuls les paiements réellement effectués (avec une transaction) sont comptabilisés
+// Only payments actually made (with a transaction) are booked
 export const paidInMonth = (entries: LedgerEntry[], month: string) =>
   entries.filter(e => e.decision === 'allow' && e.txid && monthOf(e.ts) === month)
-// Paiements ET remboursements du mois (un remboursement est une écriture au crédit)
+// Payments AND refunds of the month (a refund is a credit booking)
 export const bookedInMonth = (entries: LedgerEntry[], month: string) =>
   entries.filter(e => (e.decision === 'allow' || e.decision === 'refund') && e.txid && monthOf(e.ts) === month)
 const label = (e: LedgerEntry) => {
@@ -56,7 +56,7 @@ export class DatevExporter implements AccountingExporter {
     const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate()
     const now = berlin(new Date())
 
-    // Ligne 1 : en-tête DATEV (31 champs)
+    // Line 1: DATEV header (31 fields)
     const header = [
       q('EXTF'), 700, 21, q('Buchungsstapel'), 13,
       `${now.y}${now.m}${now.d}${now.H}${now.M}${now.S}000`, '', q('AP'), q('AgentGetPay'), q(''),
@@ -66,14 +66,14 @@ export class DatevExporter implements AccountingExporter {
       q(this.cfg.chartOfAccounts), '', '', q(''), q('')
     ].join(';')
 
-    // Ligne 2 : noms des colonnes
+    // Line 2: column names
     const columns = [
       'Umsatz (ohne Soll/Haben-Kz)', 'Soll/Haben-Kennzeichen', 'WKZ Umsatz', 'Kurs', 'Basis-Umsatz',
       'WKZ Basis-Umsatz', 'Konto', 'Gegenkonto (ohne BU-Schlüssel)', 'BU-Schlüssel', 'Belegdatum',
       'Belegfeld 1', 'Belegfeld 2', 'Skonto', 'Buchungstext'
     ].join(';')
 
-    // Lignes suivantes : une écriture par paiement (S = débit) et par remboursement (H = crédit)
+    // Following lines: one booking per payment (S = debit) and per refund (H = credit)
     const rows = bookedInMonth(entries, month).map(e => {
       const b = berlin(e.ts)
       const refund = e.decision === 'refund'
@@ -82,8 +82,8 @@ export class DatevExporter implements AccountingExporter {
         eur(e.amountEur), q(refund ? 'H' : 'S'), q('EUR'), '', '', q(''),
         this.cfg.expenseAccount, this.cfg.walletAccount, q(''),
         `${b.d}${b.m}`,                       // Belegdatum (TTMM)
-        q(`AGP-${e.seq}`),                    // Belegfeld 1 : numéro de pièce = entrée du journal
-        q(e.txid!.slice(0, 12)),              // Belegfeld 2 : début de la transaction BSV
+        q(`AGP-${e.seq}`),                    // Belegfeld 1: voucher number = audit log entry
+        q(e.txid!.slice(0, 12)),              // Belegfeld 2: start of the BSV transaction
         '', q(text)
       ].join(';')
     })
@@ -95,7 +95,7 @@ export class DatevExporter implements AccountingExporter {
   }
 }
 
-// ---- Relevé mensuel lisible (le "Beleg" pour le comptable), avec les preuves blockchain ----
+// ---- Readable monthly statement (the "Beleg" for the accountant), with the blockchain proofs ----
 export function monthlyStatementHtml(entries: LedgerEntry[], anchors: Anchor[], month: string, cfg: AccountingConfig) {
   const paid = bookedInMonth(entries, month)
   const sign = (e: LedgerEntry) => (e.decision === 'refund' ? -1 : 1)

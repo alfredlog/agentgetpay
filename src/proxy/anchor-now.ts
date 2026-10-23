@@ -1,4 +1,4 @@
-// Demande au proxy d'ancrer le journal sur BSV tout de suite.
+// Asks the proxy to anchor the audit log on BSV right now.
 const PROXY = process.env.PROXY_URL ?? 'http://localhost:5050'
 const res = await fetch(`${PROXY}/v1/anchor`, { method: 'POST' })
 const a = await res.json() as { seq?: number; txid?: string; message?: string; error?: string }

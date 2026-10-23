@@ -1,5 +1,5 @@
-// Validation humaine. Les demandes sont enregistrées (RequestStore) : un canal ne fait que PRÉVENIR un humain
-// et TRANSMETTRE sa décision. Une décision peut arriver des heures ou des jours plus tard, même après un redémarrage.
+// Human approval. Requests are stored (RequestStore): a channel only ALERTS a human
+// and PASSES ON their decision. A decision may arrive hours or days later, even after a restart.
 import type { StoredRequest } from './requests.js'
 import { fmt } from './policy.js'
 
@@ -7,14 +7,14 @@ export type DecisionHandler = (requestId: string, approved: boolean, by: string)
 
 export interface ApprovalNotifier {
   readonly name: string
-  // Prévient un humain ; renvoie de quoi retrouver le message (pour le mettre à jour plus tard)
+  // Alerts a human; returns what is needed to find the message again (to update it later)
   notify(r: StoredRequest): Promise<Record<string, unknown> | undefined>
-  // La demande est terminée (décidée ailleurs, exécutée, expirée) : on met le message à jour
+  // The request is over (decided elsewhere, executed, expired): update the message
   closed(r: StoredRequest, outcome: string): Promise<void>
   onDecision(handler: DecisionHandler): void
 }
 
-// Texte d'une demande, lisible sur un téléphone
+// Text of a request, readable on a phone
 export function describeRequest(r: StoredRequest): string {
   const until = new Date(r.expiresAt).toLocaleString('en-GB', { timeZone: 'Europe/Berlin', dateStyle: 'medium', timeStyle: 'short' })
   if (r.kind === 'mandate' && r.mandate) {
@@ -43,7 +43,7 @@ export function describeRequest(r: StoredRequest): string {
   ].join('\n')
 }
 
-// --- Telegram : un message avec deux boutons sur ton téléphone ---
+// --- Telegram: a message with two buttons on your phone ---
 export class TelegramNotifier implements ApprovalNotifier {
   readonly name = 'telegram'
   private api: string
@@ -83,7 +83,7 @@ export class TelegramNotifier implements ApprovalNotifier {
     await this.call('editMessageText', { chat_id: t.chatId, message_id: t.messageId, text: `${t.text}\n\n${outcome}` })
   }
 
-  // Écoute les clics sur les boutons (long polling : pas besoin de serveur public)
+  // Listens to button clicks (long polling: no public server needed)
   private async poll() {
     for (;;) {
       try {
@@ -105,7 +105,7 @@ export class TelegramNotifier implements ApprovalNotifier {
     }
   }
 
-  // Renvoie le résultat de Telegram (ex. le message envoyé), ou undefined en cas d'erreur
+  // Returns Telegram's result (e.g. the message sent), or undefined on error
   private async call(method: string, body: object): Promise<any> {
     try {
       const res = await fetch(`${this.api}/${method}`, {
@@ -120,7 +120,7 @@ export class TelegramNotifier implements ApprovalNotifier {
   }
 }
 
-// --- Sans Telegram : on décide sur le tableau de bord, rien à envoyer ---
+// --- Without Telegram: decisions are made on the dashboard, nothing to send ---
 export class DashboardOnlyNotifier implements ApprovalNotifier {
   readonly name = 'dashboard'
   async notify() { return undefined }
@@ -128,7 +128,7 @@ export class DashboardOnlyNotifier implements ApprovalNotifier {
   onDecision() {}
 }
 
-// --- Réponse automatique, pour les tests sans téléphone ---
+// --- Automatic answer, for tests without a phone ---
 export class AutoNotifier implements ApprovalNotifier {
   readonly name = 'auto'
   private handler?: DecisionHandler

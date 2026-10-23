@@ -1,4 +1,4 @@
-// Test hors ligne du proxy : faux portefeuille, fausse blockchain, vendeur en SKIP_BROADCAST=1.
+// Offline test of the proxy: fake wallet, fake blockchain, seller with SKIP_BROADCAST=1.
 import 'dotenv/config'
 import { PrivateKey, Transaction, P2PKH, Broadcaster } from '@bsv/sdk'
 
@@ -6,7 +6,7 @@ const key = PrivateKey.fromWif(process.env.BSV_WIF!)
 const funding = new Transaction()
 funding.addOutput({ lockingScript: new P2PKH().lock(key.toAddress('testnet')), satoshis: 100000 })
 
-// Fausse blockchain : garde les transactions "diffusées" en mémoire
+// Fake blockchain: keeps the "broadcast" transactions in memory
 const chain = new Map<string, string>()
 const broadcaster = {
   async broadcast(tx: Transaction) {

@@ -1,7 +1,7 @@
-// Affiche la configuration à coller dans un assistant IA compatible MCP, avec les chemins exacts de cet ordinateur.
-// Usage : npm run mcp:config                         → agent docs-01 (clé de démo), proxy local
-//         npm run mcp:config -- <clé>                → avec la clé d'un autre agent (créée sur la page d'administration)
-//         npm run mcp:config -- <clé> <adresse>      → proxy sur un serveur, ex. https://agentpay.pdf-libre.de
+// Prints the configuration to paste into an MCP-compatible AI assistant, with the exact paths of this computer.
+// Usage: npm run mcp:config                         → agent docs-01 (demo key), local proxy
+//         npm run mcp:config -- <key>                → with another agent's key (issued on the admin page)
+//         npm run mcp:config -- <key> <address>      → proxy on a server, e.g. https://agentpay.pdf-libre.de
 import { resolve } from 'node:path'
 import { createRequire } from 'node:module'
 
@@ -13,7 +13,7 @@ const tsxCli = createRequire(import.meta.url).resolve('tsx/cli')
 const config = {
   mcpServers: {
     agentgetpay: {
-      command: process.execPath, // chemin complet de Node.js : les applications ne voient pas toujours ton PATH
+      command: process.execPath, // full path of Node.js: apps do not always see your PATH
       args: [tsxCli, resolve(root, 'src/mcp/server.ts')],
       env: {
         AGENTGETPAY_API_KEY: key,

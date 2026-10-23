@@ -1,10 +1,10 @@
-// Place de marché de DÉMONSTRATION : trois boutiques fictives qui se font payer par des agents IA,
-// en BSV via HTTP 402, avec le kit vendeur. Chaque boutique décrit ce qu'elle vend (catégorie, articles,
-// livraison) : le proxy de l'entreprise acheteuse applique sa politique d'achats avant de payer.
+// DEMO market: three fictional shops that get paid by AI agents,
+// in BSV via HTTP 402, with the seller kit. Each shop describes what it sells (category, items,
+// delivery): the buying company's proxy applies its purchase policy before paying.
 //
-//   GET  /            vitrine (pour les humains : produits et dernières commandes payées)
-//   GET  /api         catalogue pour les agents : boutiques, adresses, prix, exemples
-//   GET  /api/hotels  disponibilités et prix (gratuit)       POST /api/hotels/book       réserver (payant)
+//   GET  /            storefront (for humans: products and latest paid orders)
+//   GET  /api         catalog for agents: shops, addresses, prices, examples
+//   GET  /api/hotels  availability and prices (free)       POST /api/hotels/book       book (paid)
 //   GET  /api/office/products  (gratuit)                     POST /api/office/orders     commander (payant)
 //   GET  /api/software/plans   (gratuit)                     POST /api/software/subscribe s'abonner (payant)
 import 'dotenv/config'
@@ -16,10 +16,10 @@ import type { OrderInfo } from '../shared/x402.js'
 
 const PORT = Number(process.env.MARKET_PORT ?? 5080)
 const HOST = process.env.MARKET_HOST ?? '127.0.0.1'
-const EUR_PER_SAT = Number(process.env.EUR_PER_SAT ?? 0.01) // même taux fictif que le proxy (testnet)
+const EUR_PER_SAT = Number(process.env.EUR_PER_SAT ?? 0.01) // same fictional rate as the proxy (testnet)
 const PUBLIC_URL = (process.env.MARKET_PUBLIC_URL ?? `http://localhost:${PORT}`).replace(/\/$/, '')
 
-// Secret de la boutique : créé au premier démarrage (il dérive l'adresse de chaque facture)
+// Shop secret: created on first start (it derives the address of each invoice)
 let SECRET = process.env.MARKET_SECRET ?? ''
 if (SECRET.length < 16) {
   SECRET = randomBytes(24).toString('base64url')
@@ -51,12 +51,12 @@ const MERCHANTS = { office: 'Bürobedarf Weber', software: 'CloudSoft Store' }
 const eur = (sats: number) => `€${(sats * EUR_PER_SAT).toFixed(2)}`
 
 // ---------------------------------------------------------------------------
-// Commandes payées (pour la vitrine et les confirmations)
+// Paid orders (for the storefront and confirmations)
 // ---------------------------------------------------------------------------
 interface Sale {
   id: string; ts: string; merchant: string; category: string; summary: string; sats: number; txid: string
-  checkIn?: string                 // hôtel : date d'arrivée (pour les conditions d'annulation)
-  paid?: PaidInvoice               // de quoi rembourser
+  checkIn?: string                 // hotel: check-in date (for the cancellation terms)
+  paid?: PaidInvoice               // what is needed to refund
   status?: 'paid' | 'cancelled'
   refundTxid?: string; refundSats?: number
 }
@@ -87,7 +87,7 @@ const seller = createSeller({
 })
 
 // ---------------------------------------------------------------------------
-// Prix et commandes, calculés à partir de la requête
+// Prices and orders, computed from the request
 // ---------------------------------------------------------------------------
 const today = () => new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Berlin' })
 function hotelQuote(b: any): { amount: number; order: OrderInfo } | { error: string } {
@@ -196,8 +196,8 @@ app.post('/api/software/subscribe', seller.requirePayment(req => softwareQuote(r
   res.json({ subscription: res.locals.saleId ?? 'already confirmed', plan: req.body.plan, seats: req.body.seats ?? 1, period: '1 month', txid: res.locals.payment?.txid })
 })
 
-// Annulation, avec remboursement en BSV (en-tête PAYMENT-REFUND : le proxy de l'acheteur le vérifie et l'enregistre)
-//   hôtel : gratuite jusqu'à la veille de l'arrivée · fournitures : dans l'heure · abonnement : pas de remboursement
+// Cancellation with a refund in BSV (PAYMENT-REFUND header: the buyer's proxy verifies and records it)
+//   hotel: free until the day before check-in · office supplies: within 1 hour · subscription: no refund
 app.post('/api/cancel', async (req, res) => {
   const sale = sales.find(x => x.id === String(req.body?.order ?? '').trim().toUpperCase())
   if (!sale) return res.status(404).json({ error: 'Unknown order' })
@@ -217,7 +217,7 @@ app.post('/api/cancel', async (req, res) => {
 })
 
 // ---------------------------------------------------------------------------
-// Vitrine (pour les humains et le jury)
+// Storefront (for humans and the jury)
 // ---------------------------------------------------------------------------
 const esc = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!))
 app.get('/', (req, res) => {

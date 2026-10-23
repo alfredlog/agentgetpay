@@ -1,5 +1,5 @@
-// Test de la place de marché de démo, à travers le proxy : catalogue, hôtel, fournitures, abonnement, vitrine.
-// Faux portefeuille, fausse blockchain : rien n'est payé, rien n'est touché chez toi.
+// Test of the demo market through the proxy: catalog, hotel, office supplies, subscription, storefront.
+// Fake wallet, fake blockchain: nothing is paid, nothing on your machine is touched.
 import { mkdtempSync, cpSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'

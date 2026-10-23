@@ -1,6 +1,6 @@
-// Accès en lecture au tableau de bord : l'administrateur crée un code pour chaque personne autorisée
-// (comptable, direction…). Le code permet de VOIR le tableau de bord et de télécharger les exports,
-// pas de modifier les agents. Seul le hash du code est stocké ; on peut le révoquer à tout moment.
+// Read access to the dashboard: the administrator creates a code for each authorised person
+// (accountant, management…). The code allows VIEWING the dashboard and downloading the exports,
+// not changing agents. Only the hash of the code is stored; it can be revoked at any time.
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
@@ -9,7 +9,7 @@ export interface Viewer {
   id: string
   name: string
   keyHash: string
-  keyHint: string // les 4 derniers caractères, pour reconnaître le code
+  keyHint: string // the last 4 characters, to recognise the code
   createdAt: string
   createdBy: string
 }
@@ -32,7 +32,7 @@ export class ViewerStore {
 
   list() { return this.viewers.map(({ keyHash, ...v }) => v) }
 
-  // Nouveau code : renvoyé UNE seule fois
+  // New code: returned ONLY once
   create(name: string, createdBy: string): { viewer: Omit<Viewer, 'keyHash'>; code: string } {
     const code = `agv_${randomBytes(18).toString('base64url')}`
     const v: Viewer = {
