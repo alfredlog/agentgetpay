@@ -2,7 +2,7 @@
 // For each 402: rules → budget reservation → signature → payment → audit log.
 import 'dotenv/config'
 import express from 'express'
-import { appendFileSync } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { WhatsOnChainUtxoProvider, UtxoProvider, ChainedUtxoProvider } from '../shared/utxo.js'
 import { JsonPolicyEngine, fmt, formatAddress } from './policy.js'
@@ -175,6 +175,19 @@ export function createProxy(
   app.use(oauth.router())
   app.use(express.static('public')) // the dashboard: http://localhost:5050
 
+  // Merchants known to accept BSV: listed as such in the service catalog, or already paid in BSV by the company
+  const bsvMerchants = () => {
+    const set = new Set<string>()
+    try {
+      const path = process.env.MCP_SERVICES ?? 'config/services.json'
+      if (existsSync(path)) for (const s of JSON.parse(readFileSync(path, 'utf8'))) {
+        if (!Array.isArray(s.accepts) || s.accepts.includes('bsv')) set.add(new URL(s.discovery).hostname)
+      }
+    } catch { /* an unreadable catalog only disables this shortcut */ }
+    for (const e of ledger.allSync()) if (e.decision === 'allow' && e.txid && e.rail !== 'card') { try { set.add(new URL(e.url).hostname) } catch {} }
+    return set
+  }
+
   // The purchase engine: rules, mandates, approvals (even long ones), payment, refunds
   const engine = createPurchaseEngine({
     eurPerSat: EUR_PER_SAT, policy, budget, keys, utxos, walletLock, ledger, record, requests, mandates,
@@ -184,7 +197,8 @@ export function createProxy(
     broadcaster: opts.broadcaster,
     approvalTtlHours: APPROVAL_TTL_HOURS,
     publicBase: ISSUER,
-    cards
+    cards,
+    acceptsBsv: domain => bsvMerchants().has(domain)
   })
   void engine.resume()
   const sweeper = setInterval(() => void engine.sweep(), Number(process.env.APPROVAL_SWEEP_MS ?? 30_000))
@@ -441,6 +455,7 @@ export function createProxy(
         spentMonthEur: (await budget.spentThisMonth(a.id)) * EUR_PER_SAT,
         monthlyBudgetEur: r?.monthly_budget_eur,
         categories: r?.categories ? Object.keys(r.categories) : [],
+        paymentMethods: r?.payment_methods?.length ? r.payment_methods : ['bsv'],
         maxPerPaymentEur: r?.max_per_payment_eur ?? 0,
         approvalAboveEur: r?.approval_above_eur ?? 0,
         allowedDomains: r?.allowed_domains ?? []
@@ -482,6 +497,10 @@ export function createProxy(
         v.monthly_budget_eur !== undefined ? `${fmt(v.monthly_budget_eur)}/month` : '',
         v.approval_above_eur !== undefined ? `approval above ${fmt(v.approval_above_eur)}` : ''].filter(Boolean).join(' ')).join('; ')}` : 'Purchase categories removed (all categories allowed)')
     }
+    const methods = (r: typeof before) => (r.payment_methods?.length ? r.payment_methods : ['bsv']).join(' + ')
+    if (methods(before) !== methods(after)) parts.push(`Payment methods: ${methods(after)}`)
+    if ((before.card_categories ?? []).join(',') !== (after.card_categories ?? []).join(',')) parts.push(`Cards only for: ${(after.card_categories ?? []).join(', ') || 'any category'}`)
+    if ((before.card_only_if_no_bsv !== false) !== (after.card_only_if_no_bsv !== false)) parts.push(`BSV first ${after.card_only_if_no_bsv === false ? 'off' : 'on'}`)
     const addrText = (r: typeof before) => JSON.stringify(r.shipping_addresses ?? [])
     if (addrText(before) !== addrText(after)) parts.push(`Delivery addresses: ${(after.shipping_addresses ?? []).map(formatAddress).join(' | ') || 'none'}`)
     return parts.join(' · ')

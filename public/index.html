@@ -258,7 +258,7 @@ async function refresh() {
       return `<div class="card agent">
         <div class="top"><span class="name">${esc(a.agentId)}${a.active === false ? '<span class="tag">Suspended</span>' : ''}</span><span class="amt">${eur(a.spentEur)} / ${eur(a.budgetEur)} today</span></div>
         <div class="bar ${pct >= 100 ? 'full' : ''}"><div style="width:${pct}%"></div></div>
-        <div class="rules">${a.monthlyBudgetEur !== undefined ? `${eur(a.spentMonthEur)} / ${eur(a.monthlyBudgetEur)} this month · ` : ''}Max ${eur(a.maxPerPaymentEur)} per payment · approval above ${eur(a.approvalAboveEur)} · ${a.allowedDomains.map(esc).join(', ')}${a.categories?.length ? ` · buys: ${a.categories.map(esc).join(', ')}` : ''}</div>
+        <div class="rules">${a.monthlyBudgetEur !== undefined ? `${eur(a.spentMonthEur)} / ${eur(a.monthlyBudgetEur)} this month · ` : ''}Max ${eur(a.maxPerPaymentEur)} per payment · approval above ${eur(a.approvalAboveEur)} · ${a.allowedDomains.map(esc).join(', ')}${a.categories?.length ? ` · buys: ${a.categories.map(esc).join(', ')}` : ''} · pays with ${a.paymentMethods.map(m => m === 'bsv' ? 'BSV' : 'card').join(' + ')}</div>
       </div>`
     }).join('')
 

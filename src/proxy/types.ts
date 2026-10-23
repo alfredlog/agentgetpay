@@ -9,6 +9,7 @@ export interface PaymentRequest {
   amountSats: number
   amountEur: number
   purpose?: string // why the agent pays (for the audit)
+  rail?: 'bsv' | 'card' // how it would be paid (default: BSV via HTTP 402)
   order?: OrderInfo // what is bought, if the merchant describes it (category, items, delivery)
 }
 

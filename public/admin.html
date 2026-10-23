@@ -57,6 +57,9 @@
   .key.pairbox { word-break: normal; } .key.pairbox code { word-break: break-all; }
   code.pair { font-size: 22px; letter-spacing: .12em; font-weight: 700; }
   .hidden { display: none; }
+  .pay { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin: 2px 0 10px; }
+  label.chk { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); margin-bottom: 6px; }
+  label.chk input { width: auto; margin: 0; }
   details.rules { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin: 2px 0 12px; }
   details.rules summary { cursor: pointer; font-size: 13px; font-weight: 600; }
   details.rules .hint { margin: 6px 0; font-size: 12px; } details.rules code { font-size: 12px; }
@@ -235,6 +238,7 @@ $('v-btn').onclick = async () => {
 }
 $('v-name').oninput = () => { $('v-msg').textContent = '' }
 
+const pm = r => (r.payment_methods && r.payment_methods.length ? r.payment_methods : ['bsv'])
 const catRow = (k = '', v = {}) => `<div class="cat" data-cat>
   <input data-k="name" placeholder="travel.hotel" value="${esc(k)}">
   <input data-k="max_unit_price_eur" type="number" step="0.01" min="0.01" placeholder="—" value="${v.max_unit_price_eur ?? ''}">
@@ -265,6 +269,13 @@ function card(a) {
       <label>Monthly budget €<input data-f="monthly_budget_eur" type="number" step="0.01" min="0.01" placeholder="no limit" value="${r.monthly_budget_eur ?? ''}"></label>
     </div>
     <label>Allowed domains (comma-separated)<input data-f="allowed_domains" value="${esc(r.allowed_domains.join(', '))}"></label>
+    <div class="pay">
+      <div class="sub" style="margin-top:0">How this agent may pay <span class="hint">(the company decides, not the AI)</span></div>
+      <label class="chk"><input type="checkbox" data-pm="bsv" ${pm(r).includes('bsv') ? 'checked' : ''}> BSV (HTTP 402)</label>
+      <label class="chk"><input type="checkbox" data-pm="card" ${pm(r).includes('card') ? 'checked' : ''}> Virtual cards</label>
+      <label class="chk"><input type="checkbox" data-f2="card_only_if_no_bsv" ${r.card_only_if_no_bsv === false ? '' : 'checked'}> BSV first: no card where the merchant accepts BSV</label>
+      <label>Cards only for categories (comma-separated, empty = any allowed)<input data-f="card_categories" placeholder="travel" value="${esc((r.card_categories || []).join(', '))}"></label>
+    </div>
     <details class="rules" ${r.categories || r.shipping_addresses ? 'open' : ''}>
       <summary>Purchase rules ${r.categories ? `· ${Object.keys(r.categories).length} categories` : '· all categories allowed'}${r.shipping_addresses ? ` · ${r.shipping_addresses.length} delivery address${r.shipping_addresses.length > 1 ? 'es' : ''}` : ''}</summary>
       <div class="hint">Applied when a merchant describes what it sells. If you list categories, only those can be bought. Category <code>travel</code> also covers <code>travel.hotel</code>.</div>
@@ -314,7 +325,10 @@ function wire(a) {
     const r = await api('/agents/' + a.id, 'PUT', { rules: {
       daily_budget_eur: val('daily_budget_eur'), max_per_payment_eur: val('max_per_payment_eur'),
       approval_above_eur: val('approval_above_eur'), monthly_budget_eur: val('monthly_budget_eur'),
-      allowed_domains: val('allowed_domains'), categories, shipping_addresses } })
+      allowed_domains: val('allowed_domains'), categories, shipping_addresses,
+      payment_methods: [...c.querySelectorAll('[data-pm]')].filter(i => i.checked).map(i => i.dataset.pm),
+      card_categories: val('card_categories'),
+      card_only_if_no_bsv: c.querySelector('[data-f2="card_only_if_no_bsv"]').checked } })
     msg(r.message === 'No change' ? 'Nothing changed' : `Saved: ${r.message}`)
   })
   // Category and address rows: add / remove

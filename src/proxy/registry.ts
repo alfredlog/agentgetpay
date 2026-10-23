@@ -118,6 +118,20 @@ export function validateRules(input: any): Rules {
     rules.categories = cats
   }
 
+  // Payment methods (default: BSV only) and card restrictions
+  if (input?.payment_methods !== undefined) {
+    const m = (Array.isArray(input.payment_methods) ? input.payment_methods : String(input.payment_methods).split(','))
+      .map((x: unknown) => String(x).trim().toLowerCase()).filter(Boolean)
+    if (!m.length) throw new Error('Allow at least one payment method')
+    for (const x of m) if (x !== 'bsv' && x !== 'card') throw new Error(`Unknown payment method: ${x}`)
+    rules.payment_methods = [...new Set<string>(m)] as ('bsv' | 'card')[]
+  }
+  const cardCats = (Array.isArray(input?.card_categories) ? input.card_categories : String(input?.card_categories ?? '').split(','))
+    .map((c: unknown) => String(c).trim().toLowerCase()).filter(Boolean)
+  for (const c of cardCats) if (!/^[a-z0-9]+(\.[a-z0-9]+)*$/.test(c)) throw new Error(`Invalid card category: ${c}`)
+  if (cardCats.length) rules.card_categories = [...new Set<string>(cardCats)]
+  if (input?.card_only_if_no_bsv === false || input?.card_only_if_no_bsv === 'false') rules.card_only_if_no_bsv = false
+
   // Allowed delivery addresses
   if (Array.isArray(input?.shipping_addresses) && input.shipping_addresses.length) {
     if (input.shipping_addresses.length > 10) throw new Error('Too many delivery addresses (10 maximum)')

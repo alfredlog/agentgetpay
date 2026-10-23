@@ -21,7 +21,17 @@ export interface Rules {
   categories?: Record<string, CategoryRule>
   // Addresses the agent may have goods delivered to (usually the company's sites)
   shipping_addresses?: ShippingAddress[]
+  // How this agent may pay: the COMPANY decides, not the AI. Default: BSV only.
+  payment_methods?: PaymentMethod[]
+  // Virtual cards only for these purchase categories (e.g. ["travel"]); empty = any allowed category
+  card_categories?: string[]
+  // BSV first (default true): refuse a card when the merchant accepts BSV
+  card_only_if_no_bsv?: boolean
 }
+
+export type PaymentMethod = 'bsv' | 'card'
+export const methodsOf = (r: Rules): PaymentMethod[] => r.payment_methods?.length ? r.payment_methods : ['bsv']
+const covers = (parent: string, cat: string) => cat === parent || cat.startsWith(`${parent}.`)
 
 // Two addresses are "the same" if postcode, city, country and street (without spaces or punctuation) match
 // (München = Muenchen, Leopoldstraße 1 = Leopoldstr. 1)
@@ -57,6 +67,18 @@ export class JsonPolicyEngine implements PolicyEngine {
     const host = new URL(req.url).hostname
     if (!r.allowed_domains.includes(host)) {
       return { kind: 'deny', reason: `Domain not allowed: ${host}` }
+    }
+
+    // ---- Payment method chosen by the company ----
+    const rail = req.rail ?? 'bsv'
+    if (!methodsOf(r).includes(rail)) {
+      return { kind: 'deny', reason: rail === 'card' ? 'Card payments are not allowed for this agent (company setting)' : 'BSV payments are not allowed for this agent (company setting)' }
+    }
+    if (rail === 'card' && r.card_categories?.length) {
+      const cat = req.order?.category
+      if (!cat || !r.card_categories.some(c => covers(c, cat))) {
+        return { kind: 'deny', reason: `Cards are only allowed for: ${r.card_categories.join(', ')} (this purchase: ${cat ?? 'no category'})` }
+      }
     }
 
     // ---- Purchase rules (if the merchant describes what it sells) ----

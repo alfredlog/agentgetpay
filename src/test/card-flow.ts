@@ -46,7 +46,8 @@ try {
   key = (await adminCall('/v1/admin/agents', 'POST', { id: 'einkauf-01', rules: {
     daily_budget_eur: 600, monthly_budget_eur: 2000, max_per_payment_eur: 400, approval_above_eur: 100, allowed_domains: 'localhost',
     categories: { 'travel.hotel': { max_unit_price_eur: 150 }, 'office.supplies': { max_unit_price_eur: 50 }, software: { approval_above_eur: 0 } },
-    shipping_addresses: [company]
+    shipping_addresses: [company],
+    payment_methods: ['bsv', 'card'], card_only_if_no_bsv: false // the demo market accepts both: allow cards there
   } })).json.apiKey
 
   // 1. A small card, within policy: issued at once
@@ -121,6 +122,40 @@ try {
   check(bad.status === 401, 'The card network only accepts known merchant acquirers')
   const list = (await agent('/v1/cards')).json as any[]
   check(list.length === 3 && list.every(c => !('numberHash' in c) && !('number' in c)), 'Card lists never contain card numbers')
+
+  // 10. The COMPANY chooses how each agent pays
+  const mk = async (id: string, extra: Record<string, unknown>) => (await adminCall('/v1/admin/agents', 'POST', { id, rules: {
+    daily_budget_eur: 300, max_per_payment_eur: 200, approval_above_eur: 150, allowed_domains: 'localhost',
+    categories: { 'travel.hotel': { max_unit_price_eur: 150 }, 'office.supplies': { max_unit_price_eur: 50 } }, shipping_addresses: [company], ...extra
+  } })).json.apiKey
+  const asAgent = async (k: string, fn: () => Promise<any>) => { const old = key; key = k; try { return await fn() } finally { key = old } }
+  const officeCard = { merchantName: 'Bürobedarf Weber', merchantDomain: 'localhost', category: 'office.supplies', amountEur: 5, purpose: 'Pens' }
+
+  const bsvOnly = await mk('bsv-only-01', {})
+  r = await asAgent(bsvOnly, () => agent('/v1/cards', 'POST', officeCard))
+  check(r.status === 403 && /Card payments are not allowed for this agent/.test(r.json.reason), 'Default agent (BSV only): a card request is refused')
+  check((await asAgent(bsvOnly, () => agent('/v1/me'))).json.rules.payment_methods === undefined, 'Default payment method is BSV (nothing to configure)')
+
+  const bsvFirst = await mk('bsv-first-01', { payment_methods: ['bsv', 'card'] })
+  r = await asAgent(bsvFirst, () => shop('/api/office/orders', { items: [{ sku: 'pens', quantity: 1 }], shipTo: company }))
+  check(r.status === 200, 'BSV-first agent pays the shop in BSV')
+  r = await asAgent(bsvFirst, () => agent('/v1/cards', 'POST', officeCard))
+  check(r.status === 403 && /accepts BSV: pay with pay_and_fetch instead of a card/.test(r.json.reason), 'BSV first: no card for a merchant that accepts BSV')
+
+  const travelCards = await mk('travel-cards-01', { payment_methods: ['bsv', 'card'], card_categories: ['travel'], card_only_if_no_bsv: false })
+  r = await asAgent(travelCards, () => agent('/v1/cards', 'POST', officeCard))
+  check(r.status === 403 && /Cards are only allowed for: travel/.test(r.json.reason), 'Cards limited to travel: an office card is refused')
+  r = await asAgent(travelCards, () => agent('/v1/cards', 'POST', { merchantName: 'City Lodge München', merchantDomain: 'localhost', category: 'travel.hotel', amountEur: 89, items: [{ name: 'Compact room', quantity: 1, unitPriceEur: 89, unit: 'night' }], purpose: 'One night' }))
+  check(r.status === 200 && r.json.card?.limitEur === 89, 'Cards limited to travel: a hotel card is issued')
+
+  const cardOnly = await mk('card-only-01', { payment_methods: ['card'] })
+  r = await asAgent(cardOnly, () => shop('/api/office/orders', { items: [{ sku: 'pens', quantity: 1 }], shipTo: company }))
+  check(r.status === 403 && /BSV payments are not allowed for this agent/.test(r.json.reason), 'Card-only agent: a BSV payment is refused')
+
+  const bad2 = await adminCall('/v1/admin/agents/bsv-only-01', 'PUT', { rules: { daily_budget_eur: 300, max_per_payment_eur: 200, approval_above_eur: 150, allowed_domains: 'localhost', payment_methods: [] } })
+  check(bad2.status === 400 && /at least one payment method/.test(bad2.json.error), 'Admin must keep at least one payment method')
+  const chg = await adminCall('/v1/admin/agents/bsv-only-01', 'PUT', { rules: { daily_budget_eur: 300, max_per_payment_eur: 200, approval_above_eur: 150, allowed_domains: 'localhost', payment_methods: ['bsv', 'card'], card_categories: 'travel' } })
+  check(/Payment methods: bsv \+ card/.test(chg.json.message) && /Cards only for: travel/.test(chg.json.message), 'Changing payment methods is described in the audit log')
 } catch (e) {
   console.error(e); failures++
 } finally {
