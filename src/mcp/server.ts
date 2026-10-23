@@ -1,21 +1,21 @@
 // Serveur MCP d'AgentGetPay : n'importe quel assistant IA compatible MCP (Claude, ChatGPT,
-// Copilot, Cursor, Gemini CLI, agents faits maison…) peut acheter des services à travers le proxy.
+// Copilot, Cursor, Gemini CLI, home-made agents…) can buy services through the proxy.
 //
-// L'IA n'a JAMAIS de clé de portefeuille : elle passe par le proxy, qui applique les règles,
-// demande la validation humaine si besoin, paie et enregistre tout dans le journal d'audit.
+// The AI NEVER holds a wallet key: it goes through the proxy, which applies the rules,
+// asks for human approval when needed, pays, and records everything in the audit log.
 //
 // Deux modes :
-//   MCP_TRANSPORT=stdio (par défaut) → l'application lance ce programme sur l'ordinateur.
-//       La clé de l'agent vient de AGENTGETPAY_API_KEY.
-//   MCP_TRANSPORT=http → serveur web sur http://127.0.0.1:5070/mcp.
-//       Chaque client s'identifie comme UN agent, avec son budget : soit une clé d'agent
-//       ("Authorization: Bearer agp_…"), soit un jeton obtenu par connexion OAuth (Claude, ChatGPT…).
-//       Sans identifiant valide, on répond 401 avec l'adresse de la connexion OAuth : l'assistant affiche « Connecter ».
+//   MCP_TRANSPORT=stdio (default) → the app starts this program on the computer.
+//       The agent key comes from AGENTGETPAY_API_KEY.
+//   MCP_TRANSPORT=http → web server on http://127.0.0.1:5070/mcp.
+//       Each client identifies as ONE agent, with its budget: either an agent key
+//       ("Authorization: Bearer agp_…"), or a token obtained by signing in with OAuth (Claude, ChatGPT…).
+//       Without valid credentials we answer 401 with the OAuth sign-in address: the assistant shows "Connect".
 //
-// Fichiers : l'IA ne lit ni n'écrit librement sur le disque. Elle ne voit que le dossier de travail
-// (MCP_WORKSPACE, par défaut ./workspace ; en mode http, un sous-dossier par agent). En mode http, l'assistant
-// travaille à distance : il donne à l'utilisateur un lien de dépôt (in/) et des liens de téléchargement (out/). Dans un appel, {"$file": "facture.pdf"} est remplacé par
-// le contenu du fichier ; les fichiers reçus (PDF…) sont enregistrés dans workspace/out/.
+// Files: the AI does not read or write freely on disk. It only sees the working folder
+// (MCP_WORKSPACE, ./workspace by default; in http mode, one subfolder per agent). In http mode the assistant
+// works remotely: it gives the user an upload link (in/) and download links (out/). In a call, {"$file": "invoice.pdf"} is replaced by
+// the file content; received files (PDF…) are saved in workspace/out/.
 import 'dotenv/config'
 import { readFile, writeFile, mkdir, readdir, stat, realpath } from 'node:fs/promises'
 import { existsSync, readFileSync } from 'node:fs'
@@ -30,12 +30,12 @@ import { FileLinks } from './file-links.js'
 const PROXY = (process.env.AGENTGETPAY_URL ?? 'http://127.0.0.1:5050').replace(/\/$/, '')
 const WORKSPACE = resolve(process.env.MCP_WORKSPACE ?? 'workspace')
 const MAX_FILE_MB = Number(process.env.MCP_MAX_FILE_MB ?? 25)
-const MAX_WORKSPACE_MB = Number(process.env.MCP_MAX_WORKSPACE_MB ?? 200) // par agent, en mode connecteur
-const MAX_TEXT = 20_000 // au-delà, la réponse est tronquée pour ne pas noyer l'IA
-const log = (...a: unknown[]) => console.error('[mcp]', ...a) // jamais stdout : c'est le canal du protocole en mode stdio
+const MAX_WORKSPACE_MB = Number(process.env.MCP_MAX_WORKSPACE_MB ?? 200) // per agent, in connector mode
+const MAX_TEXT = 20_000 // beyond this, the response is truncated so the AI is not flooded
+const log = (...a: unknown[]) => console.error('[mcp]', ...a) // never stdout: it is the protocol channel in stdio mode
 
 // ---------------------------------------------------------------------------
-// Dossier de travail (bac à sable)
+// Working folder (sandbox)
 // ---------------------------------------------------------------------------
 function inWorkspace(ws: string, name: string): string {
   const p = resolve(ws, name)
@@ -46,7 +46,7 @@ function inWorkspace(ws: string, name: string): string {
   return p
 }
 
-// Remplace {"$file": "nom"} par le contenu du fichier en base64
+// Replaces {"$file": "name"} with the file content in base64
 async function attachFiles(ws: string, value: unknown): Promise<unknown> {
   if (Array.isArray(value)) return Promise.all(value.map(v => attachFiles(ws, v)))
   if (value && typeof value === 'object') {
@@ -55,7 +55,7 @@ async function attachFiles(ws: string, value: unknown): Promise<unknown> {
       const p = inWorkspace(ws, obj.$file)
       const st = await stat(p).catch(() => undefined)
       if (!st?.isFile()) throw new Error(`File not found in the workspace: ${obj.$file}`)
-      // Un lien symbolique ne doit pas mener hors du dossier de travail
+      // A symbolic link must not lead outside the working folder
       const real = await realpath(p)
       if (relative(await realpath(ws), real).startsWith('..')) throw new Error(`"${obj.$file}" points outside the workspace folder`)
       if (st.size > MAX_FILE_MB * 1024 * 1024) throw new Error(`${obj.$file} is larger than ${MAX_FILE_MB} MB`)
@@ -68,7 +68,7 @@ async function attachFiles(ws: string, value: unknown): Promise<unknown> {
   return value
 }
 
-// Enregistre les gros contenus base64 d'une réponse dans workspace/out/ et les remplace par {"$file": …}
+// Saves large base64 contents of a response in workspace/out/ and replaces them with {"$file": …}
 async function extractFiles(ws: string, value: unknown, hint = 'result'): Promise<unknown> {
   if (Array.isArray(value)) return Promise.all(value.map(v => extractFiles(ws, v, hint)))
   if (value && typeof value === 'object') {
@@ -81,7 +81,7 @@ async function extractFiles(ws: string, value: unknown, hint = 'result'): Promis
   if (typeof value === 'string' && value.length > 2000 && /^[A-Za-z0-9+/=\r\n]+$/.test(value)) {
     const buf = Buffer.from(value, 'base64')
     const ext = buf.subarray(0, 5).toString('latin1') === '%PDF-' ? '.pdf' : extname(hint) || '.bin'
-    // Jamais écraser un résultat précédent : rapport.pdf, rapport-2.pdf…
+    // Never overwrite a previous result: report.pdf, report-2.pdf…
     const stem = basename(hint, extname(hint)) || 'result'
     await mkdir(join(ws, 'out'), { recursive: true })
     let file = `${stem}${ext}`
@@ -116,8 +116,8 @@ const eur = (v: number) => `€${Number(v).toFixed(2)}`
 const short = (s: string) => (s.length > MAX_TEXT ? `${s.slice(0, MAX_TEXT)}\n… (truncated, ${s.length} characters)` : s)
 
 // ---------------------------------------------------------------------------
-// Les outils, pour un agent donné (identifié par sa clé d'API)
-// ws : son dossier de travail. links : en mode connecteur, liens de dépôt et de téléchargement.
+// The tools, for one agent (identified by its API key)
+// ws: its working folder. links: in connector mode, upload and download links.
 // ---------------------------------------------------------------------------
 interface Ctx { ws: string; agentId?: string; links?: FileLinks }
 
@@ -140,10 +140,10 @@ function buildServer(apiKey: string, ctx: Ctx = { ws: WORKSPACE }) {
           'Always give the user the download link of each file you produce.'
         : 'Files are taken from the workspace folder on this computer.')
   })
-  // Lien de téléchargement pour un fichier du dossier (mode connecteur)
+  // Download link for a file in the folder (connector mode)
   const download = (file: string) => links ? links.downloadLink(ws, file, ctx.agentId ?? 'agent').url : undefined
 
-  // Catalogue des services approuvés par l'entreprise (config/services.json)
+  // Catalog of services approved by the company (config/services.json)
   server.registerTool('list_services', {
     title: 'List approved services',
     description: 'Lists the paid services the company has approved (for example PDF compression and merging), with their API addresses and prices. Call this first when the user asks for something a paid service can do.',
@@ -199,7 +199,7 @@ function buildServer(apiKey: string, ctx: Ctx = { ws: WORKSPACE }) {
     return result(`${q.description ?? url}: ${q.priceSats} sats (${eur(q.priceEur)}). Your rules: ${verdict}.`, q)
   })
 
-  // Présente la réponse d'un service à l'assistant (fichiers enregistrés, liens de téléchargement)
+  // Presents a service response to the assistant (saved files, download links)
   const present = async (r: Awaited<ReturnType<typeof proxy>>, prefix = '') => {
     const data = r.json !== undefined ? await extractFiles(ws, r.json) : undefined
     const head = prefix + (r.paidSats ? `Paid ${r.paidSats} sats. ` : 'No payment needed. ') +
@@ -229,7 +229,7 @@ function buildServer(apiKey: string, ctx: Ctx = { ws: WORKSPACE }) {
     let payload: unknown
     try { payload = body === undefined ? undefined : await attachFiles(ws, body) } catch (e) { return result((e as Error).message, undefined, true) }
     log(`${method} ${url} — ${purpose}`)
-    // On attend une validation 20 s au plus : au-delà, la demande reste ouverte et l'assistant continue
+    // Wait for an approval 20 s at most: after that the request stays open and the assistant moves on
     const r = await proxy(apiKey, '/v1/fetch', { url, method, body: payload, purpose, waitSeconds: 20 })
     if (r.status === 202 && r.json?.decision === 'pending_approval') return result(pendingText(r.json), { status: 202, ...r.json })
     if (!r.ok) {
@@ -332,7 +332,7 @@ function buildServer(apiKey: string, ctx: Ctx = { ws: WORKSPACE }) {
 }
 
 // ---------------------------------------------------------------------------
-// Démarrage
+// Startup
 // ---------------------------------------------------------------------------
 await mkdir(WORKSPACE, { recursive: true })
 
@@ -342,28 +342,28 @@ if ((process.env.MCP_TRANSPORT ?? 'stdio') === 'http') {
   const app = express()
   const publicHost = process.env.PROXY_PUBLIC_HOST?.trim()
 
-  // Liens de dépôt et de téléchargement (avant le lecteur JSON : un fichier déposé reste brut)
+  // Upload and download links (before the JSON parser: an uploaded file stays raw)
   const publicBase = (process.env.MCP_PUBLIC_BASE ?? (publicHost ? `https://${publicHost}` : `http://127.0.0.1:${PORT}`)).replace(/\/$/, '')
   const links = new FileLinks(publicBase, MAX_FILE_MB, MAX_WORKSPACE_MB)
   app.use(links.router(log))
 
   app.use(express.json({ limit: '60mb' }))
 
-  // Où se trouve la connexion OAuth (servie par le proxy, à son adresse publique)
+  // Where the OAuth sign-in lives (served by the proxy, at its public address)
   const issuer = (process.env.OAUTH_ISSUER ?? (publicHost ? `https://${publicHost}` : PROXY)).replace(/\/$/, '')
   const resourceMetadata = `${issuer}/.well-known/oauth-protected-resource/mcp`
   const unauthorized = (res: express.Response, message: string, invalid = false) => res.status(401)
     .set('WWW-Authenticate', `Bearer resource_metadata="${resourceMetadata}"${invalid ? ', error="invalid_token"' : ''}`)
     .json({ jsonrpc: '2.0', error: { code: -32001, message }, id: null })
 
-  // Certains clients cherchent la description OAuth sur l'adresse du serveur MCP lui-même : on relaie celle du proxy
+  // Some clients look for the OAuth description on the MCP server's own address: relay the proxy's one
   app.get(['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp'], async (_req, res) => {
     const r = await fetch(`${PROXY}/.well-known/oauth-protected-resource/mcp`).catch(() => undefined)
     if (!r?.ok) return res.status(503).json({ error: 'AgentGetPay proxy unreachable' })
     res.set('Access-Control-Allow-Origin', '*').json(await r.json())
   })
 
-  // Les assistants qui tournent dans un navigateur ont besoin de lire l'en-tête WWW-Authenticate
+  // Assistants running in a browser need to read the WWW-Authenticate header
   app.use('/mcp', (req, res, next) => {
     res.set('Access-Control-Allow-Origin', '*')
     res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type, MCP-Protocol-Version, Mcp-Session-Id')
@@ -372,9 +372,9 @@ if ((process.env.MCP_TRANSPORT ?? 'stdio') === 'http') {
     next()
   })
 
-  // Le jeton est-il valable ? On demande au proxy (il connaît les clés d'agent et les jetons OAuth).
-  // Petit cache de 30 s pour ne pas interroger le proxy à chaque message.
-  // Renvoie l'agent lié au jeton, ou undefined si le jeton n'est pas valable.
+  // Is the token valid? Ask the proxy (it knows the agent keys and the OAuth tokens).
+  // Small 30 s cache so the proxy is not queried on every message.
+  // Returns the agent bound to the token, or undefined if the token is not valid.
   const valid = new Map<string, { exp: number; agentId: string }>()
   const checkToken = async (t: string): Promise<string | undefined> => {
     const hit = valid.get(t)
@@ -389,7 +389,7 @@ if ((process.env.MCP_TRANSPORT ?? 'stdio') === 'http') {
     return agentId
   }
 
-  // Mode sans session : un serveur MCP neuf par requête, lié à l'agent qui appelle
+  // Stateless mode: a fresh MCP server per request, bound to the calling agent
   app.post('/mcp', async (req, res) => {
     const auth = req.get('Authorization') ?? ''
     if (!auth.startsWith('Bearer ') || auth.length < 12) return unauthorized(res, 'Sign in required: connect this assistant to AgentGetPay')
@@ -397,14 +397,14 @@ if ((process.env.MCP_TRANSPORT ?? 'stdio') === 'http') {
     let agentId: string | undefined
     try { agentId = await checkToken(t); if (!agentId) return unauthorized(res, 'Invalid or expired token: connect again', true) }
     catch { return res.status(503).json({ jsonrpc: '2.0', error: { code: -32002, message: 'AgentGetPay proxy unreachable' }, id: null }) }
-    // Chaque agent a son propre dossier : un assistant ne voit jamais les fichiers d'un autre
+    // Each agent has its own folder: an assistant never sees another agent's files
     const ws = join(WORKSPACE, agentId)
     await mkdir(ws, { recursive: true })
     const server = buildServer(t, { ws, agentId, links })
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,
-      // Protection contre le "DNS rebinding" : seules ces adresses peuvent appeler le serveur
+      // Protection against "DNS rebinding": only these addresses may call the server
       enableDnsRebindingProtection: true,
       allowedHosts: [`127.0.0.1:${PORT}`, `localhost:${PORT}`, ...(process.env.MCP_ALLOWED_HOSTS?.split(',') ?? [])]
     })

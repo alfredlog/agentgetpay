@@ -1,6 +1,6 @@
-// DÉMO : un tricheur "intelligent" qui a accès au serveur.
-// Il change le montant d'une entrée, puis RECALCULE toutes les empreintes suivantes
-// pour que la chaîne locale reste cohérente. Seul l'ancrage sur BSV peut le démasquer.
+// DEMO: a "smart" cheater with access to the server.
+// It changes the amount of one entry, then RECOMPUTES all following fingerprints
+// so the local chain stays consistent. Only the BSV anchor can expose it.
 import { readFileSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 

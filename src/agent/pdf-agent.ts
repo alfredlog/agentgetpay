@@ -1,8 +1,8 @@
-// Démo : l'agent "docs-01" utilise PDF Libre comme service payant, via le proxy.
-// Il n'a aucune clé : il envoie ses PDF au proxy, qui applique les règles et paie PDF Libre.
+// Demo: agent "docs-01" uses PDF Libre as a paid service, through the proxy.
+// It has no key: it sends its PDFs to the proxy, which applies the rules and pays PDF Libre.
 //
-// Usage : npm run agent:pdf                         → avec deux PDF d'exemple générés
-//         npm run agent:pdf -- facture.pdf contrat.pdf → avec tes propres fichiers
+// Usage: npm run agent:pdf                         → with two generated sample PDFs
+//         npm run agent:pdf -- invoice.pdf contract.pdf → with your own files
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { basename } from 'node:path'
 
@@ -10,7 +10,7 @@ const PROXY = process.env.PROXY_URL ?? 'http://localhost:5050'
 const PDF_LIBRE = process.env.PDF_LIBRE_URL ?? 'http://localhost:3000'
 const API_KEY = 'dev-docs-01'
 
-// ---- Petite PDF d'exemple écrite à la main (pas besoin de bibliothèque) ----
+// ---- Small hand-written sample PDF (no library needed) ----
 function samplePdf(title: string, pages: number): Buffer {
   const objs: string[] = []
   objs[1] = '<< /Type /Catalog /Pages 2 0 R >>'
@@ -34,7 +34,7 @@ function samplePdf(title: string, pages: number): Buffer {
   return Buffer.from(out, 'latin1')
 }
 
-// ---- Appel d'un service à travers le proxy ----
+// ---- Calling a service through the proxy ----
 async function call(path: string, body: object | undefined, purpose: string) {
   const res = await fetch(`${PROXY}/v1/fetch`, {
     method: 'POST',
@@ -54,25 +54,25 @@ mkdirSync('data/out', { recursive: true })
 const save = (d: any) => { writeFileSync(`data/out/${d.filename}`, Buffer.from(d.pdf, 'base64')); return `data/out/${d.filename}` }
 const kb = (n: number) => `${(n / 1024).toFixed(1)} KB`
 
-// 1. Découverte : quels outils, quels prix ? (gratuit)
+// 1. Discovery: which tools, which prices? (free)
 const menu = await call('/agent/v1', undefined, 'Discover tools and prices')
 if (!menu.ok) throw new Error(`PDF Libre unreachable through the proxy: ${JSON.stringify(menu.data)}`)
 console.log('PDF Libre tools:', menu.data.tools.map((t: any) => `${t.path} (${t.price} sats)`).join(', '), '\n')
 
-// 2. Compresser : sous le seuil de validation → payé automatiquement
+// 2. Compress: below the approval threshold → paid automatically
 const c = await call('/agent/v1/compress', { pdf: pdfA.toString('base64'), filename: nameA }, 'Compress the invoice before emailing it')
 console.log(c.ok
   ? `✔ compress  paid ${c.paid} sats  ${kb(c.data.originalSize)} → ${kb(c.data.resultSize)}  saved ${save(c.data)}`
   : `✘ compress  ${c.status}  ${c.data.reason ?? c.data.error}`)
 
-// 3. Fusionner : au-dessus du seuil → validation humaine sur Telegram
+// 3. Merge: above the threshold → human approval on Telegram
 console.log('… merge costs more than the approval threshold: check your phone')
 const m = await call('/agent/v1/merge', { pdfs: [pdfA.toString('base64'), pdfB.toString('base64')], filename: nameA }, 'Merge invoice and contract for the client file')
 console.log(m.ok
   ? `✔ merge     paid ${m.paid} sats  ${m.data.inputs} files  saved ${save(m.data)}`
   : `✘ merge     ${m.status}  ${m.data.reason ?? m.data.error}`)
 
-// 4. Fichier abîmé : PDF Libre refuse le travail, l'agent ne paie rien
+// 4. Damaged file: PDF Libre refuses the work, the agent pays nothing
 const broken = Buffer.from('%PDF-1.4\nthis file is damaged')
 const b = await call('/agent/v1/compress', { pdf: broken.toString('base64'), filename: 'damaged.pdf' }, 'Compress a damaged file')
 console.log(b.ok ? `? damaged file was accepted` : `✘ damaged   ${b.data.reason ?? b.data.error}`)

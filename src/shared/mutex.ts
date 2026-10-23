@@ -1,5 +1,5 @@
-// Un seul paiement (ou ancrage) dépense le portefeuille à la fois.
-// Sans ça, deux opérations simultanées prendraient la même pièce → double dépense refusée.
+// Only one payment (or anchor) spends the wallet at a time.
+// Without this, two simultaneous operations would take the same coin → double spend refused.
 export class Mutex {
   private tail: Promise<unknown> = Promise.resolve()
   run<T>(fn: () => Promise<T>): Promise<T> {

@@ -1,6 +1,6 @@
-// Journal d'audit "append-only" : chaque ligne contient le hash de la précédente.
-// Modifier une ancienne ligne casse toute la chaîne après elle → la fraude se voit.
-// Étape suivante : ancrer le dernier hash sur BSV pour rendre la preuve publique.
+// Append-only audit log: each line contains the hash of the previous one.
+// Changing an old line breaks the whole chain after it → tampering shows.
+// Next step: anchor the latest hash on BSV to make the proof public.
 import { appendFileSync, existsSync, readFileSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { createHash } from 'node:crypto'
@@ -12,7 +12,7 @@ const hashOf = (e: Omit<LedgerEntry, 'hash'>) =>
 
 export class JsonlLedger implements Ledger {
   constructor(private path: string) {
-    mkdirSync(dirname(path), { recursive: true }) // crée le dossier data/ s'il manque
+    mkdirSync(dirname(path), { recursive: true }) // creates the data/ folder if it is missing
   }
 
   async all(): Promise<LedgerEntry[]> {

@@ -186,7 +186,7 @@ async function loadMandates() {
   })
 }
 
-// Accès au tableau de bord en lecture seule
+// Read-only dashboard access
 async function loadViewers() {
   const list = await api('/viewers')
   $('v-list').innerHTML = list.length ? list.map(v => `<div class="top" style="padding:6px 0;border-bottom:1px solid var(--line)">
@@ -296,7 +296,7 @@ function wire(a) {
       allowed_domains: val('allowed_domains'), categories, shipping_addresses } })
     msg(r.message === 'No change' ? 'Nothing changed' : `Saved: ${r.message}`)
   })
-  // Lignes de catégories et d'adresses : ajouter / supprimer
+  // Category and address rows: add / remove
   c.querySelector('[data-a="add-cat"]').onclick = () => c.querySelector('[data-cats]').insertAdjacentHTML('beforeend', catRow())
   c.querySelector('[data-a="add-addr"]').onclick = () => c.querySelector('[data-addrs]').insertAdjacentHTML('beforeend', addrRow())
   c.querySelector('details.rules').onclick = e => { if (e.target.matches('[data-remove]')) { e.target.parentElement.remove(); msg('') } }

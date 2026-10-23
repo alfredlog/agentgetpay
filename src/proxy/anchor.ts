@@ -1,7 +1,7 @@
-// Ancrage du journal d'audit sur BSV.
-// On publie l'empreinte (hash) d'une entrée du journal dans une transaction OP_RETURN.
-// Comme chaque entrée contient le hash de la précédente, ancrer l'entrée N
-// "scelle" toutes les entrées 1 à N : modifier l'une d'elles change le hash de N.
+// Anchoring the audit log on BSV.
+// We publish the fingerprint (hash) of one log entry in an OP_RETURN transaction.
+// Since each entry contains the hash of the previous one, anchoring entry N
+// "seals" entries 1 to N: changing any of them changes the hash of N.
 import { appendFileSync, existsSync, readFileSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { createHash } from 'node:crypto'
@@ -16,7 +16,7 @@ const PROTOCOL = 'agentpay-v1'
 
 export interface Anchor { seq: number; hash: string; txid: string; ts: string }
 
-// ---- Format des données sur la blockchain : OP_FALSE OP_RETURN "agentpay-v1" <seq> <hash> ----
+// ---- Data format on the blockchain: OP_FALSE OP_RETURN "agentpay-v1" <seq> <hash> ----
 const push = (bytes: number[]) => Utils.toHex([bytes.length, ...bytes]) // pushes < 76 octets
 
 export function anchorScript(seq: number, hash: string): LockingScript {
@@ -37,7 +37,7 @@ export function parseAnchorTx(rawHex: string): { seq: number; hash: string } | u
   return undefined
 }
 
-// ---- Liste locale des ancrages (un index : la preuve elle-même est sur la blockchain) ----
+// ---- Local list of anchors (an index: the proof itself is on the blockchain) ----
 export class AnchorLog {
   constructor(private path: string) { mkdirSync(dirname(path), { recursive: true }) }
   all(): Anchor[] {
@@ -48,7 +48,7 @@ export class AnchorLog {
   last() { return this.all().at(-1) }
 }
 
-// ---- Publication sur BSV ----
+// ---- Publishing on BSV ----
 export class BsvAnchorRail {
   constructor(
     private address: string,
@@ -76,10 +76,10 @@ export class BsvAnchorRail {
   }
 }
 
-// ---- Vérification indépendante : journal local contre blockchain ----
+// ---- Independent verification: local log against the blockchain ----
 export type FetchTxHex = (txid: string) => Promise<string>
 
-const cache = new Map<string, string>() // une transaction ne change jamais : on la lit une seule fois
+const cache = new Map<string, string>() // a transaction never changes: read it only once
 export const cachedWocFetch: FetchTxHex = async txid => {
   if (!cache.has(txid)) cache.set(txid, await getTxHex(txid))
   return cache.get(txid)!
@@ -88,24 +88,24 @@ export const cachedWocFetch: FetchTxHex = async txid => {
 const hashOf = (e: Omit<LedgerEntry, 'hash'>) => createHash('sha256').update(JSON.stringify(e)).digest('hex')
 
 export interface ChainCheck {
-  localOk: boolean        // la chaîne de hashes est cohérente avec elle-même
+  localOk: boolean        // the hash chain is consistent with itself
   localBrokenAt?: number
-  chainOk: boolean        // les entrées ancrées correspondent à la blockchain
-  chainBrokenAt?: number  // première entrée ancrée qui ne correspond plus
-  anchoredUpTo: number    // dernière entrée scellée sur BSV
-  unanchored: number      // entrées pas encore ancrées
+  chainOk: boolean        // anchored entries match the blockchain
+  chainBrokenAt?: number  // first anchored entry that no longer matches
+  anchoredUpTo: number    // last entry sealed on BSV
+  unanchored: number      // entries not anchored yet
   anchors: number
 }
 
 export async function verifyAgainstChain(entries: LedgerEntry[], anchors: Anchor[], fetchHex: FetchTxHex): Promise<ChainCheck> {
-  // 1. Cohérence locale
+  // 1. Local consistency
   let prev = '0'.repeat(64), localBrokenAt: number | undefined
   for (const e of entries) {
     const { hash, ...rest } = e
     if (e.prevHash !== prev || hashOf(rest) !== hash) { localBrokenAt = e.seq; break }
     prev = hash
   }
-  // 2. Chaque ancrage : le hash écrit sur la blockchain doit être celui de l'entrée locale
+  // 2. Each anchor: the hash written on the blockchain must be the hash of the local entry
   const bySeq = new Map(entries.map(e => [e.seq, e]))
   let chainBrokenAt: number | undefined
   for (const a of anchors) {

@@ -1,4 +1,4 @@
-// Crée les secrets dans .env (une seule fois) : la clé de l'agent et le secret du vendeur.
+// Creates the secrets in .env (only once): the agent key and the seller secret.
 import { PrivateKey } from '@bsv/sdk'
 import { randomBytes } from 'node:crypto'
 import { existsSync, readFileSync, appendFileSync } from 'node:fs'
