@@ -4,5 +4,11 @@
     "description": "PDF tools for agents: compress a PDF, merge several PDFs. Paid per call in BSV.",
     "discovery": "https://pdf-libre.de/agent/v1",
     "example": "POST https://pdf-libre.de/agent/v1/compress with body {\"pdf\": {\"$file\": \"in/invoice.pdf\"}, \"filename\": \"invoice.pdf\"}"
+  },
+  {
+    "name": "Demo Market (fictional shops)",
+    "description": "Hotels in Munich (travel.hotel), office supplies with delivery (office.supplies), software subscriptions (software.subscription). Search and catalogs are free; bookings and orders are paid in BSV.",
+    "discovery": "https://shop.pdf-libre.de/api",
+    "example": "GET https://shop.pdf-libre.de/api/hotels?checkIn=2026-10-30&nights=2, then POST https://shop.pdf-libre.de/api/hotels/book with {\"hotel\": \"citylodge\", \"room\": \"standard\", \"checkIn\": \"2026-10-30\", \"nights\": 2, \"guest\": \"Name\"}"
   }
 ]

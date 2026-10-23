@@ -66,6 +66,17 @@ MCP clients connect to `https://agentpay.pdf-libre.de/mcp`:
 - **Claude, ChatGPT…** (connectors with OAuth): on the admin page, click **Connect an assistant** on an agent, add the connector URL in the assistant, click **Connect** and type the code.
 - **Agents and scripts**: send `Authorization: Bearer <agent API key>`.
 
+## 8. Demo market (optional)
+
+Fictional shops (hotels, office supplies, software) that agents can buy from, paid in BSV via 402.
+
+1. DNS: add an **A record** `shop` → the VPS IP address (same as `agentpay`).
+2. Add the `shop.pdf-libre.de` block from `deploy/Caddyfile.example` to `/etc/caddy/Caddyfile`, then `sudo caddy validate --config /etc/caddy/Caddyfile` and `sudo systemctl reload caddy`.
+3. Add `MARKET_PUBLIC_URL=https://shop.pdf-libre.de` to `.env`, then `pm2 start deploy/ecosystem.config.cjs --only agentgetpay-market && pm2 save`. The market secret is created in `.env` on first start.
+4. On the admin page, add `shop.pdf-libre.de` to the allowed domains of the agents that may buy there, and set their purchase rules.
+
+The storefront at `https://shop.pdf-libre.de` shows the shops and the latest orders paid by agents, with links to the transactions.
+
 ## Update later
 
 ```bash

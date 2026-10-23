@@ -21,3 +21,10 @@ agentpay.pdf-libre.de {
 		reverse_proxy 127.0.0.1:5050
 	}
 }
+
+# Place de marché de démo (boutiques fictives) : un AUTRE nom de domaine que le proxy,
+# car un agent n'a jamais le droit d'appeler l'adresse du proxy lui-même.
+shop.pdf-libre.de {
+	encode gzip
+	reverse_proxy 127.0.0.1:5080
+}
