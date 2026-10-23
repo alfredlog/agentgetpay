@@ -1,6 +1,7 @@
 // Les interfaces du proxy. Le reste du code ne connaît QUE ces interfaces :
 // pour passer en version entreprise, on écrit une nouvelle classe, sans toucher au proxy.
 import type { Unlocker } from '../agent/pay-fetch.js'
+import type { OrderInfo } from '../shared/x402.js'
 
 export interface PaymentRequest {
   agentId: string
@@ -8,6 +9,7 @@ export interface PaymentRequest {
   amountSats: number
   amountEur: number
   purpose?: string // pourquoi l'agent paie (pour l'audit)
+  order?: OrderInfo // ce qui est acheté, si le marchand le décrit (catégorie, articles, livraison)
 }
 
 export type Decision =
@@ -20,11 +22,22 @@ export interface PolicyEngine {
   evaluate(req: PaymentRequest): Promise<Decision>
 }
 
-// Compte ce que chaque agent a dépensé aujourd'hui. Hackathon : mémoire. Entreprise : Redis.
+// Plafonds à respecter au moment de réserver (en sats)
+export interface BudgetLimits {
+  daySats: number
+  monthSats?: number
+  category?: string         // catégorie complète de l'achat, ex. "travel.hotel"
+  categoryKey?: string      // catégorie qui porte le plafond, ex. "travel"
+  categoryMonthSats?: number
+}
+
+// Compte ce que chaque agent a dépensé (jour, mois, mois par catégorie). Hackathon : mémoire. Entreprise : Redis.
 export interface BudgetStore {
   spentToday(agentId: string): Promise<number> // en sats
-  tryReserve(agentId: string, sats: number, limitSats: number): Promise<boolean>
-  release(agentId: string, sats: number): Promise<void>
+  spentThisMonth(agentId: string, category?: string): Promise<number> // en sats
+  // Réserve le montant si AUCUN plafond n'est dépassé ; sinon renvoie la raison du refus
+  tryReserve(agentId: string, sats: number, limits: BudgetLimits): Promise<string | undefined>
+  release(agentId: string, sats: number, category?: string): Promise<void>
   reset(agentId: string): Promise<void> // remet le compteur du jour à zéro (administration)
 }
 
@@ -45,6 +58,7 @@ export interface LedgerEntry {
   decision: Decision['kind'] | 'error' | 'admin' // 'admin' = modification des règles
   reason?: string
   txid?: string
+  order?: OrderInfo   // ce qui a été acheté (marchand, catégorie, articles, livraison)
   approvedBy?: string // qui a validé (Vier-Augen-Prinzip)
   action?: string     // pour les entrées 'admin' : type de modification (ex. 'budget_reset')
   prevHash: string

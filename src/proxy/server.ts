@@ -6,7 +6,7 @@ import { appendFileSync } from 'node:fs'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { payFetch } from '../agent/pay-fetch.js'
 import { WhatsOnChainUtxoProvider, UtxoProvider, ChainedUtxoProvider } from '../shared/utxo.js'
-import { JsonPolicyEngine, fmt } from './policy.js'
+import { JsonPolicyEngine, fmt, formatAddress } from './policy.js'
 import { MemoryBudgetStore } from './budget.js'
 import { EnvKeyStore } from './keystore.js'
 import { JsonlLedger } from './ledger.js'
@@ -19,7 +19,8 @@ import { AgentRegistry, validateRules, validAgentId } from './registry.js'
 import { ViewerStore, validViewerName } from './viewers.js'
 import { OAuthServer } from './oauth.js'
 import type { Broadcaster } from '@bsv/sdk'
-import { decode, PaymentRequired } from '../shared/x402.js'
+import { decode, PaymentRequired, OrderInfo } from '../shared/x402.js'
+import { validOrder } from '../agent/pay-fetch.js'
 
 // Testnet : les coins n'ont pas de valeur, on fixe un taux fictif pour des montants lisibles.
 // Mainnet : ce taux viendra d'une API de cours en temps réel.
@@ -151,7 +152,7 @@ export function createProxy(
   app.use(express.static('public')) // le tableau de bord : http://localhost:5050
 
   // Validations en attente, pour les afficher en direct sur le tableau de bord
-  const pending = new Map<number, { id: number; agentId: string; amountEur: number; url: string; purpose?: string; reason: string; since: string }>()
+  const pending = new Map<number, { id: number; agentId: string; amountEur: number; url: string; purpose?: string; reason: string; since: string; order?: OrderInfo }>()
   // Décisions prises sur le tableau de bord, pour chaque demande en attente
   const dashboardDecide = new Map<number, (r: { status: 'approved' | 'rejected'; by: string }) => void>()
   let pendingSeq = 0
@@ -181,11 +182,20 @@ export function createProxy(
     if (!agent) return
     const rules = registry.rulesFor(agent.id)
     const spentEur = (await budget.spentToday(agent.id)) * EUR_PER_SAT
+    const spentMonthEur = (await budget.spentThisMonth(agent.id)) * EUR_PER_SAT
+    const round = (v: number) => Math.max(0, Math.round(v * 100) / 100)
     const recent = (await ledger.all()).filter(e => e.agentId === agent.id && e.decision !== 'admin').slice(-10).reverse()
-      .map(e => ({ time: e.ts, url: e.url, amountEur: e.amountEur, decision: e.decision, reason: e.reason, approvedBy: e.approvedBy, txid: e.txid }))
+      .map(e => ({ time: e.ts, url: e.url, amountEur: e.amountEur, decision: e.decision, reason: e.reason, approvedBy: e.approvedBy, txid: e.txid, merchant: e.order?.merchant, category: e.order?.category }))
+    // Ce qui reste vraiment : le plus petit des restes du jour et du mois
+    const dayLeft = rules ? rules.daily_budget_eur - spentEur : 0
+    const monthLeft = rules?.monthly_budget_eur !== undefined ? rules.monthly_budget_eur - spentMonthEur : Infinity
+    const categories = rules?.categories ? Object.fromEntries(await Promise.all(Object.entries(rules.categories).map(async ([k, c]) =>
+      [k, { ...c, spentMonthEur: (await budget.spentThisMonth(agent.id, k)) * EUR_PER_SAT }]))) : undefined
     res.json({
-      agentId: agent.id, active: registry.isActive(agent.id), rules, spentEur,
-      remainingEur: rules ? Math.max(0, Math.round((rules.daily_budget_eur - spentEur) * 100) / 100) : 0,
+      agentId: agent.id, active: registry.isActive(agent.id), rules, spentEur, spentMonthEur,
+      remainingEur: round(Math.min(dayLeft, monthLeft)),
+      remainingMonthEur: Number.isFinite(monthLeft) ? round(monthLeft) : undefined,
+      categories,
       recent
     })
   })
@@ -216,9 +226,10 @@ export function createProxy(
         const sats = Number(offer.accepts?.[0]?.amount)
         if (!Number.isFinite(sats)) return res.status(502).json({ error: 'The service returned an unreadable price' })
         const amountEur = sats * EUR_PER_SAT
-        const d = await policy.evaluate({ agentId: agent.id, url, amountSats: sats, amountEur, purpose })
+        const order = validOrder(offer.extensions?.order)
+        const d = await policy.evaluate({ agentId: agent.id, url, amountSats: sats, amountEur, purpose, order })
         return res.json({
-          paymentRequired: true, priceSats: sats, priceEur: amountEur, description: offer.resource?.description,
+          paymentRequired: true, priceSats: sats, priceEur: amountEur, description: offer.resource?.description, order,
           decision: d.kind, reason: d.kind === 'allow' ? undefined : d.reason
         })
       } catch (e) {
@@ -230,6 +241,7 @@ export function createProxy(
     let approvedBy: string | undefined
     let reserved = 0
     let amountSats = 0
+    let order: OrderInfo | undefined
 
     try {
       const { response, paid } = await payFetch(url, {
@@ -245,15 +257,16 @@ export function createProxy(
         onSpent: tx => utxos.remember(tx), // la monnaie sert au prochain paiement
         beforePay: async offer => {
           amountSats = offer.amount
+          order = offer.order
           const amountEur = offer.amount * EUR_PER_SAT
-          const payReq = { agentId: agent.id, url, amountSats, amountEur, purpose }
+          const payReq = { agentId: agent.id, url, amountSats, amountEur, purpose, order }
           decision = await policy.evaluate(payReq)
 
           // Au-dessus du seuil : on demande à un humain, et l'agent attend
           if (decision.kind === 'needs_approval') {
             console.log(`⏳ ${agent.id} is waiting for approval of ${fmt(amountEur)}…`)
             const pid = ++pendingSeq
-            pending.set(pid, { id: pid, agentId: agent.id, amountEur, url, purpose, reason: decision.reason, since: new Date().toISOString() })
+            pending.set(pid, { id: pid, agentId: agent.id, amountEur, url, purpose, reason: decision.reason, since: new Date().toISOString(), order })
             // Le premier qui répond gagne : Telegram ou le tableau de bord
             const ctl = new AbortController()
             const fromDashboard = new Promise<{ status: 'approved' | 'rejected'; by: string }>(resolve =>
@@ -269,9 +282,9 @@ export function createProxy(
           }
           if (decision.kind !== 'allow') return false
           // Réserver le budget AVANT de signer (deux paiements simultanés ne peuvent pas dépasser)
-          const limitSats = Math.floor(policy.rulesFor(agent.id)!.daily_budget_eur / EUR_PER_SAT)
-          if (!(await budget.tryReserve(agent.id, amountSats, limitSats))) {
-            decision = { kind: 'deny', reason: 'Daily budget exceeded' }
+          const over = await budget.tryReserve(agent.id, amountSats, policy.limitsFor(agent.id, order?.category))
+          if (over) {
+            decision = { kind: 'deny', reason: over }
             return false
           }
           reserved = amountSats
@@ -280,18 +293,18 @@ export function createProxy(
       })
 
       if (paid) {
-        await record({ agentId: agent.id, url, amountSats, amountEur: amountSats * EUR_PER_SAT, purpose, decision: 'allow', txid: paid.txid, approvedBy })
+        await record({ agentId: agent.id, url, amountSats, amountEur: amountSats * EUR_PER_SAT, purpose, decision: 'allow', txid: paid.txid, approvedBy, order })
         console.log(`✔ ${agent.id} paid ${fmt(amountSats * EUR_PER_SAT)} (${amountSats} sats) → ${url}${approvedBy ? ` — approved by ${approvedBy}` : ''}`)
       }
       res.status(response.status).set('X-Paid-Sats', String(paid?.amount ?? 0))
         .type(response.headers.get('content-type') ?? 'text/plain').send(Buffer.from(await response.arrayBuffer()))
     } catch (err) {
-      if (reserved) await budget.release(agent.id, reserved) // paiement échoué : on rend le budget
+      if (reserved) await budget.release(agent.id, reserved, order?.category) // paiement échoué : on rend le budget
       const d = decision && decision.kind !== 'allow' ? decision : undefined
       // "fetch failed" = le service n'a pas répondu du tout (par exemple : le vendeur n'est pas lancé)
       if ((err as Error).message === 'fetch failed') (err as Error).message = `Service unreachable: ${new URL(url).host}`
       await record({
-        agentId: agent.id, url, amountSats, amountEur: amountSats * EUR_PER_SAT, purpose,
+        agentId: agent.id, url, amountSats, amountEur: amountSats * EUR_PER_SAT, purpose, order,
         decision: d?.kind ?? 'error', reason: d?.reason ?? (err as Error).message
       })
       console.log(`✘ ${agent.id} → ${url} : ${d?.reason ?? (err as Error).message}`)
@@ -328,6 +341,9 @@ export function createProxy(
         active: a.active,
         spentEur: (await budget.spentToday(a.id)) * EUR_PER_SAT,
         budgetEur: r?.daily_budget_eur ?? 0,
+        spentMonthEur: (await budget.spentThisMonth(a.id)) * EUR_PER_SAT,
+        monthlyBudgetEur: r?.monthly_budget_eur,
+        categories: r?.categories ? Object.keys(r.categories) : [],
         maxPerPaymentEur: r?.max_per_payment_eur ?? 0,
         approvalAboveEur: r?.approval_above_eur ?? 0,
         allowedDomains: r?.allowed_domains ?? []
@@ -357,14 +373,28 @@ export function createProxy(
     money('Daily budget', before.daily_budget_eur, after.daily_budget_eur)
     money('Max per payment', before.max_per_payment_eur, after.max_per_payment_eur)
     money('Approval above', before.approval_above_eur, after.approval_above_eur)
+    if (before.monthly_budget_eur !== after.monthly_budget_eur) {
+      parts.push(after.monthly_budget_eur === undefined ? 'Monthly budget removed' : `Monthly budget ${before.monthly_budget_eur === undefined ? 'none' : fmt(before.monthly_budget_eur)} → ${fmt(after.monthly_budget_eur)}`)
+    }
     if (before.allowed_domains.join(',') !== after.allowed_domains.join(',')) parts.push(`Domains: ${after.allowed_domains.join(', ')}`)
+    const catText = (r: typeof before) => JSON.stringify(r.categories ?? null)
+    if (catText(before) !== catText(after)) {
+      const c = after.categories
+      parts.push(c ? `Purchase categories: ${Object.entries(c).map(([k, v]) => [k,
+        v.max_unit_price_eur !== undefined ? `max ${fmt(v.max_unit_price_eur)}/unit` : '',
+        v.monthly_budget_eur !== undefined ? `${fmt(v.monthly_budget_eur)}/month` : '',
+        v.approval_above_eur !== undefined ? `approval above ${fmt(v.approval_above_eur)}` : ''].filter(Boolean).join(' ')).join('; ')}` : 'Purchase categories removed (all categories allowed)')
+    }
+    const addrText = (r: typeof before) => JSON.stringify(r.shipping_addresses ?? [])
+    if (addrText(before) !== addrText(after)) parts.push(`Delivery addresses: ${(after.shipping_addresses ?? []).map(formatAddress).join(' | ') || 'none'}`)
     return parts.join(' · ')
   }
 
   admin.get('/agents', async (_req, res) => {
     res.json(await Promise.all(registry.list().map(async a => ({
       id: a.id, active: a.active, keyHint: a.keyHint ?? (a.apiKey ? a.apiKey.slice(-4) : undefined),
-      rules: registry.rulesFor(a.id), spentEur: (await budget.spentToday(a.id)) * EUR_PER_SAT
+      rules: registry.rulesFor(a.id), spentEur: (await budget.spentToday(a.id)) * EUR_PER_SAT,
+      spentMonthEur: (await budget.spentThisMonth(a.id)) * EUR_PER_SAT
     }))))
   })
 

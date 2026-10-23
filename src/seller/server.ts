@@ -5,7 +5,7 @@ import express, { Request, Response } from 'express'
 import { randomBytes } from 'node:crypto'
 import { PrivateKey, Hash, Utils, P2PKH, Transaction, WhatsOnChainBroadcaster } from '@bsv/sdk'
 import {
-  NETWORK, PaymentRequired, PaymentRequirements, PaymentPayload, PaymentResponse, encode, decode
+  NETWORK, PaymentRequired, PaymentRequirements, PaymentPayload, PaymentResponse, OrderInfo, encode, decode
 } from '../shared/x402.js'
 
 const PORT = Number(process.env.SELLER_PORT ?? 4000)
@@ -21,17 +21,18 @@ interface Invoice {
   payTo: string
   expiresAt: Date
   settledTxid?: string
+  order?: string // commande facturée (JSON) : la requête payée doit décrire exactement la même
 }
 const invoices = new Map<string, Invoice>()      // par lockingScriptHex
 const locks = new Map<string, Promise<void>>()   // un paiement à la fois par facture
 
 // Chaque facture a sa propre adresse, dérivée du secret + de l'id de facture.
-function createInvoice(resource: string, amount: number): Invoice {
+function createInvoice(resource: string, amount: number, order?: OrderInfo): Invoice {
   const id = randomBytes(12).toString('hex')
   const key = new PrivateKey(Hash.sha256(Utils.toArray(`${SECRET}:${id}`, 'utf8')))
   const payTo = key.toAddress('testnet')
   const lockingScriptHex = new P2PKH().lock(payTo).toHex().toLowerCase()
-  const inv = { id, resource, amount, payTo, lockingScriptHex, expiresAt: new Date(Date.now() + 15 * 60_000) }
+  const inv = { id, resource, amount, payTo, lockingScriptHex, expiresAt: new Date(Date.now() + 15 * 60_000), order: order ? JSON.stringify(order) : undefined }
   invoices.set(lockingScriptHex, inv)
   return inv
 }
@@ -52,19 +53,26 @@ function fail(res: Response, status: number, reason: string, extra: object = {})
   res.status(status).set('PAYMENT-RESPONSE', encode(pr)).json({ error: reason, ...extra })
 }
 
+// Prix fixe, ou prix calculé à partir de la requête avec la description de la commande
+type Pricing = number | ((req: Request) => { amount: number; order: OrderInfo } | { error: string })
+
 // Middleware réutilisable : protège n'importe quelle route avec un prix.
-function requirePayment(amount: number, description: string) {
+function requirePayment(pricing: Pricing, description: string) {
   return async (req: Request, res: Response, next: () => void) => {
     const resource = `${req.method} ${req.path}`
     const header = req.get('PAYMENT-SIGNATURE')
+    const priced = typeof pricing === 'number' ? { amount: pricing, order: undefined } : pricing(req)
+    if ('error' in priced) return res.status(400).json({ error: priced.error })
+    const { amount, order } = priced
 
-    // 1. Pas de paiement → on répond 402 avec une facture neuve
+    // 1. Pas de paiement → on répond 402 avec une facture neuve (et la description de la commande)
     if (!header) {
-      const inv = createInvoice(resource, amount)
+      const inv = createInvoice(resource, amount, order)
       const body: PaymentRequired = {
         x402Version: 2,
         resource: { url: req.originalUrl, method: req.method, description },
-        accepts: [requirements(inv)]
+        accepts: [requirements(inv)],
+        ...(order ? { extensions: { order } } : {})
       }
       res.status(402).set('PAYMENT-REQUIRED', encode(body)).json(body)
       return
@@ -79,6 +87,8 @@ function requirePayment(amount: number, description: string) {
     const inv = invoices.get(script)
     if (!inv) return fail(res, 402, 'invoice_not_found')
     if (inv.resource !== resource) return fail(res, 402, 'resource_mismatch')
+    // On ne peut pas payer une commande puis en recevoir une autre (plus chère, autre adresse…)
+    if (inv.order !== (order ? JSON.stringify(order) : undefined)) return fail(res, 402, 'order_mismatch')
 
     // Un seul traitement à la fois pour une même facture
     const previous = locks.get(inv.id) ?? Promise.resolve()
@@ -138,5 +148,56 @@ app.get('/api/report', requirePayment(30, 'Full report'), (_req, res) => {
   res.json({ report: 'Full 40-page report (simulated).' })
 })
 
+// ---------------------------------------------------------------------------
+// Boutiques de démonstration (fictives) : le marchand DÉCRIT ce qu'il vend dans l'offre 402,
+// pour que le proxy de l'acheteur applique sa politique d'achats (catégorie, prix unitaire, livraison).
+// ---------------------------------------------------------------------------
+app.use(express.json())
+
+const ROOMS: Record<string, { name: string; sats: number }> = {
+  standard: { name: 'Standard room', sats: 12000 },
+  suite: { name: 'Suite', sats: 30000 }
+}
+app.post('/api/hotel/book', requirePayment(req => {
+  const room = ROOMS[String(req.body?.room ?? 'standard')]
+  const nights = Number(req.body?.nights ?? 1)
+  if (!room) return { error: `Unknown room. Choose: ${Object.keys(ROOMS).join(', ')}` }
+  if (!Number.isInteger(nights) || nights < 1 || nights > 30) return { error: 'nights must be between 1 and 30' }
+  return { amount: room.sats * nights, order: { merchant: 'Hotel Alpenblick (demo)', category: 'travel.hotel', items: [{ name: room.name, quantity: nights, unitPriceSats: room.sats, unit: 'night' }] } }
+}, 'Hotel booking'), (req, res) => {
+  res.json({ confirmation: `HA-${randomBytes(3).toString('hex').toUpperCase()}`, room: req.body?.room ?? 'standard', nights: req.body?.nights ?? 1 })
+})
+
+const PRODUCTS: Record<string, { name: string; sats: number }> = {
+  pens: { name: 'Pack of 10 pens', sats: 500 },
+  badges: { name: 'Name badge', sats: 300 },
+  monitor: { name: '27" monitor', sats: 25000 }
+}
+app.post('/api/office/order', requirePayment(req => {
+  const lines = Array.isArray(req.body?.items) ? req.body.items : []
+  if (!lines.length) return { error: 'items is required, e.g. [{"sku": "pens", "quantity": 2}]' }
+  const items = []
+  for (const l of lines) {
+    const p = PRODUCTS[String(l?.sku)]
+    const q = Number(l?.quantity ?? 1)
+    if (!p) return { error: `Unknown product ${l?.sku}. Choose: ${Object.keys(PRODUCTS).join(', ')}` }
+    if (!Number.isInteger(q) || q < 1 || q > 1000) return { error: 'quantity must be between 1 and 1000' }
+    items.push({ name: p.name, quantity: q, unitPriceSats: p.sats, unit: 'item' })
+  }
+  const a = req.body?.shipTo
+  if (!a?.street || !a?.postalCode || !a?.city || !a?.country) return { error: 'shipTo needs street, postalCode, city and country' }
+  const shipTo = { ...(a.name ? { name: String(a.name) } : {}), street: String(a.street), postalCode: String(a.postalCode), city: String(a.city), country: String(a.country).toUpperCase() }
+  return { amount: items.reduce((s, i) => s + i.quantity * i.unitPriceSats, 0), order: { merchant: 'Bürobedarf Weber (demo)', category: 'office.supplies', items, shipTo } }
+}, 'Office supplies order'), (_req, res) => {
+  res.json({ order: `BW-${randomBytes(3).toString('hex').toUpperCase()}`, delivery: '2–3 business days' })
+})
+
+app.post('/api/software/subscribe', requirePayment(() => ({
+  amount: 1900,
+  order: { merchant: 'CloudNotes (demo)', category: 'software.subscription', items: [{ name: 'CloudNotes Team, 1 month', quantity: 1, unitPriceSats: 1900, unit: 'month' }] }
+}), 'Software subscription'), (_req, res) => {
+  res.json({ subscription: `CN-${randomBytes(3).toString('hex').toUpperCase()}`, period: '1 month' })
+})
+
 // Seulement sur cet ordinateur par défaut (SELLER_HOST=0.0.0.0 pour l'ouvrir au réseau)
-app.listen(PORT, process.env.SELLER_HOST ?? '127.0.0.1', () => console.log(`Seller ready on http://localhost:${PORT} — /api/quote (10 sats), /api/analysis (18), /api/report (30)`))
+app.listen(PORT, process.env.SELLER_HOST ?? '127.0.0.1', () => console.log(`Seller ready on http://localhost:${PORT} — /api/quote (10 sats), /api/analysis (18), /api/report (30), demo shops: /api/hotel/book, /api/office/order, /api/software/subscribe`))
