@@ -20,7 +20,9 @@ import { fmt } from './policy.js'
 import type { MemoryBudgetStore } from './budget.js'
 import { monthOf } from './budget.js'
 import type { Decision, Ledger, LedgerEntry, KeyStore } from './types.js'
-import type { RequestStore, StoredRequest, MandateTerms } from './requests.js'
+import type { RequestStore, StoredRequest, MandateTerms, CardTerms } from './requests.js'
+import type { CardRail } from '../card/rail.js'
+import type { IssuedCard } from '../card/issuer.js'
 import type { MandateStore } from './mandates.js'
 import type { ApprovalNotifier } from './approval.js'
 
@@ -41,6 +43,7 @@ export interface PurchaseDeps {
   broadcaster?: Broadcaster
   approvalTtlHours: number
   publicBase: string // for the result link given to the agent
+  cards?: CardRail   // card rail (virtual cards), if enabled
 }
 
 export interface PurchaseInput {
@@ -60,6 +63,15 @@ export type PurchaseOutcome =
   | { kind: 'pending'; request: StoredRequest }
 
 class PendingApproval extends Error { constructor(public request: StoredRequest) { super('pending approval') } }
+
+// What the agent receives for a virtual card: everything needed at the merchant's checkout, and its limits
+export function cardForAgent(cardId: string, c: IssuedCard, t: CardTerms) {
+  return {
+    cardId, brand: c.brand, number: c.number, cvc: c.cvc, expMonth: c.expMonth, expYear: c.expYear, last4: c.last4,
+    limitEur: t.limitEur, merchantName: t.merchantName, merchantDomain: t.merchantDomain, category: t.category,
+    singleUse: true, note: 'Single-use card, only valid at this merchant and up to this limit. Every charge is checked by your company in real time.'
+  }
+}
 
 export function createPurchaseEngine(d: PurchaseDeps) {
   const eur = (sats: number) => sats * d.eurPerSat
@@ -234,6 +246,18 @@ export function createPurchaseEngine(d: PurchaseDeps) {
 
   // ---- Executing an approved request (in the background) ----
   async function execute(r: StoredRequest) {
+    if (r.kind === 'card' && r.card) {
+      if (!d.cards) throw new Error('Card rail not enabled')
+      try {
+        const { card, details } = await d.cards.issue(r.agentId, r.card, { order: r.order, purpose: r.purpose, requestId: r.id, approvedBy: r.decidedBy })
+        // The card details can be fetched ONCE by the agent (GET /v1/requests/:id/result), then they are deleted
+        d.requests.saveResult(r.id, Buffer.from(JSON.stringify(cardForAgent(card.cardId, details, r.card))))
+        finish(r, { status: 'completed', result: { status: 200, contentType: 'application/json', cardId: card.cardId } }, `✅ Approved by ${r.decidedBy} · virtual card •••• ${card.last4} issued (limit ${fmt(r.card.limitEur)})`)
+      } catch (e) {
+        finish(r, { status: 'failed', result: { status: 403, contentType: 'application/json', error: (e as Error).message } }, `⚠ Approved by ${r.decidedBy}, but no card issued: ${(e as Error).message}`)
+      }
+      return
+    }
     if (r.kind === 'mandate' && r.mandate) {
       const m = d.mandates.create({ ...r.mandate, agentId: r.agentId, purpose: r.purpose, approvedBy: r.decidedBy ?? 'unknown', requestId: r.id })
       await d.record({ agentId: r.agentId, url: `mandate://${m.domain}`, amountSats: 0, amountEur: 0, decision: 'admin', approvedBy: r.decidedBy, requestId: r.id, mandateId: m.id, reason: `Mandate ${m.id} granted: ${m.domain}${m.category ? ` (${m.category})` : ''}, up to ${fmt(m.maxEurPerMonth)}/month for ${m.months} month(s)` })
@@ -297,8 +321,51 @@ export function createPurchaseEngine(d: PurchaseDeps) {
     return d.requests.get(r.id)!
   }
 
+  // ---- Virtual card request (card rail): same policy and approvals as a BSV purchase ----
+  async function requestCard(agentId: string, t: CardTerms, items: { name: string; quantity: number; unitPriceEur: number; unit?: string }[] | undefined,
+    purpose: string | undefined, callbackUrl: string | undefined, waitMs: number
+  ): Promise<{ kind: 'issued'; card: ReturnType<typeof cardForAgent> } | { kind: 'refused'; reason: string } | { kind: 'pending'; request: StoredRequest }> {
+    if (!d.cards) return { kind: 'refused', reason: 'Card rail not enabled' }
+    const toSats = (eur: number) => Math.round(eur / d.eurPerSat)
+    const lines = items?.length ? items : [{ name: purpose ?? 'Purchase', quantity: 1, unitPriceEur: t.amountEur }]
+    const order: OrderInfo = { merchant: t.merchantName, category: t.category ?? 'uncategorized', items: lines.map(i => ({ name: i.name, quantity: i.quantity, unitPriceSats: toSats(i.unitPriceEur), ...(i.unit ? { unit: i.unit } : {}) })) }
+    const amountSats = order.items.reduce((s, i) => s + i.quantity * i.unitPriceSats, 0)
+    const url = `https://${t.merchantDomain}/`
+    const refuse = async (reason: string) => {
+      await d.record({ agentId, url, amountSats, amountEur: eur(amountSats), purpose, order, decision: 'deny', rail: 'card', reason })
+      console.log(`✘ ${agentId} card for ${t.merchantName}: ${reason}`)
+      return { kind: 'refused' as const, reason }
+    }
+    let decision = await d.policy.evaluate({ agentId, url, amountSats, amountEur: eur(amountSats), purpose, order })
+    const rules = d.policy.rulesFor(agentId)
+    // The card limit (price + tolerance) is what could really be charged: it must respect the per-payment maximum
+    if (decision.kind !== 'deny' && rules && t.limitEur > rules.max_per_payment_eur) decision = { kind: 'deny', reason: `Card limit ${fmt(t.limitEur)} exceeds max per payment (${fmt(rules.max_per_payment_eur)})` }
+    if (decision.kind === 'deny') return refuse(decision.reason)
+    if (!d.isActive(agentId)) return refuse('Agent suspended by an administrator')
+    if (decision.kind === 'allow') {
+      try {
+        const { card, details } = await d.cards.issue(agentId, t, { order, purpose })
+        return { kind: 'issued', card: cardForAgent(card.cardId, details, t) }
+      } catch (e) { return refuse((e as Error).message) }
+    }
+    const r = await newRequest({ kind: 'card', agentId, url, amountSats, amountEur: eur(amountSats), order, card: t, purpose, reason: decision.reason, callbackUrl })
+    const answer = await waitDecision(r.id, waitMs)
+    if (!answer) return { kind: 'pending', request: d.requests.get(r.id)! }
+    if (!answer.approved) {
+      finish(d.requests.get(r.id)!, {}, `❌ Rejected by ${answer.by}`)
+      return refuse(`Rejected by ${answer.by}`)
+    }
+    await execute(d.requests.get(r.id)!)
+    const done = d.requests.get(r.id)!
+    const body = d.requests.result(r.id)
+    if (done.status !== 'completed' || !body) return { kind: 'refused', reason: done.result?.error ?? 'Card not issued' }
+    d.requests.dropResult(r.id)
+    return { kind: 'issued', card: JSON.parse(body.toString()) }
+  }
+
   // ---- Unanswered requests: expired ----
   async function sweep() {
+    if (d.cards) await d.cards.sweep()
     const now = new Date().toISOString()
     for (const r of d.requests.open()) {
       if (r.expiresAt > now || waiters.has(r.id)) continue
@@ -327,5 +394,5 @@ export function createPurchaseEngine(d: PurchaseDeps) {
     return { sats: Number(offer.accepts?.[0]?.amount), description: offer.resource?.description, order: validOrder(offer.extensions?.order) }
   }
 
-  return { attempt, decide, execute, settleInline, requestMandate, sweep, resume, quoteOrder, usedByMandate }
+  return { attempt, decide, execute, settleInline, requestMandate, requestCard, sweep, resume, quoteOrder, usedByMandate }
 }

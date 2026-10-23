@@ -61,6 +61,7 @@
   .b-needs_approval { background: var(--warn-bg); color: var(--warn); }
   .b-admin { background: var(--bar); color: var(--accent); }
   .b-refund { background: var(--ok-bg); color: var(--ok); } .refund { color: var(--ok); }
+  .b-card { background: var(--bar); color: var(--accent); }
   .tag { margin-left: 8px; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; background: var(--bad-bg); color: var(--bad); }
   .muted { color: var(--muted); } a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
   .table-wrap { overflow-x: auto; padding: 0; }
@@ -135,7 +136,7 @@ const when = ts => {
     ? d.toLocaleTimeString()
     : d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) + ', ' + d.toLocaleTimeString()
 }
-const label = { allow: 'Paid', deny: 'Blocked', needs_approval: 'Needs approval', error: 'Error', admin: 'Rule change', refund: 'Refunded' }
+const label = { allow: 'Paid', deny: 'Blocked', needs_approval: 'Needs approval', error: 'Error', admin: 'Rule change', refund: 'Refunded', card: 'Card' }
 // "3 h ago", "in 2 days"
 const ago = ts => { const m = Math.max(0, Math.round((Date.now() - Date.parse(ts)) / 60000)); return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : m < 2880 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} days ago` }
 const inTime = ts => { const m = Math.max(0, Math.round((Date.parse(ts) - Date.now()) / 60000)); return m < 60 ? `${m} min` : m < 2880 ? `${Math.round(m / 60)} h` : `${Math.round(m / 1440)} days` }
@@ -242,7 +243,9 @@ async function refresh() {
     if (pend.dataset.ids !== shown) {
       pend.dataset.ids = shown
       pend.innerHTML = stats.pending.map(p => {
-        const what = p.kind === 'mandate'
+        const what = p.kind === 'card' && p.card
+          ? `a <b>virtual card</b> for <b>${eur(p.card.amountEur)}</b> at ${esc(p.card.merchantName)} (limit ${eur(p.card.limitEur)}, single use)`
+          : p.kind === 'mandate'
           ? `a standing approval: up to <b>${eur(p.mandate.maxEurPerMonth)}/month</b> at ${esc(p.mandate.domain)}${p.mandate.category ? ` (${esc(p.mandate.category)})` : ''} for ${p.mandate.months} month(s)`
           : `<b>${eur(p.amountEur)}</b> ${p.order ? `at ${esc(p.order.merchant)} · ${esc(p.order.items.map(i => `${i.quantity}× ${i.name}`).join(', '))}` : `to ${esc(service(p.url))}`}`
         return `<div class="pending"><span>⏳ <b>${esc(p.agentId)}</b> asks for ${what} — “${esc(p.purpose ?? '')}”<br><span class="why">${esc(p.id)} · ${esc(p.reason ?? '')} · waiting ${ago(p.createdAt).replace(' ago', '')} · expires in ${inTime(p.expiresAt)}</span></span>
@@ -264,7 +267,8 @@ async function refresh() {
       const isAdmin = e.decision === 'admin'
       const details = (isAdmin ? `${esc(e.reason)} · by ${esc(e.approvedBy)}`
         : e.approvedBy ? `Approved by ${esc(e.approvedBy)}` : esc(e.reason ?? '')) + (e.requestId ? ` <span class="muted">· ${esc(e.requestId)}</span>` : '')
-      const proof = e.txid ? `<a href="https://test.whatsonchain.com/tx/${e.txid}" target="_blank">${e.txid.slice(0, 10)}…</a>` : '<span class="muted">—</span>'
+      const proof = e.txid ? `<a href="https://test.whatsonchain.com/tx/${e.txid}" target="_blank">${e.txid.slice(0, 10)}…</a>`
+        : e.authId ? `<span class="muted" title="${esc(e.authId)}">💳 Card</span>` : '<span class="muted">—</span>'
       return `<tr class="${e.seq > seen && seen ? 'new' : ''}">
         <td class="muted">${when(e.ts)}</td>
         <td>${esc(e.agentId)}</td>

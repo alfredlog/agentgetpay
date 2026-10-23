@@ -56,7 +56,7 @@ export interface LedgerEntry {
   amountSats: number
   amountEur: number
   purpose?: string
-  decision: Decision['kind'] | 'error' | 'admin' | 'refund' // 'admin' = rule change; 'refund' = refund received
+  decision: Decision['kind'] | 'error' | 'admin' | 'refund' | 'card' // 'admin' = rule change; 'refund' = refund received; 'card' = virtual card issued
   reason?: string
   txid?: string
   order?: OrderInfo   // what was bought (merchant, category, items, delivery)
@@ -64,7 +64,10 @@ export interface LedgerEntry {
   action?: string     // for 'admin' entries: type of change (e.g. 'budget_reset')
   requestId?: string  // related approval request (R-…)
   mandateId?: string  // payment covered by a mandate (M-…)
-  refundOf?: string   // for a refund: the transaction of the refunded payment
+  refundOf?: string
+  rail?: 'bsv' | 'card' // how it was paid (default: BSV)
+  cardId?: string     // card rail: the virtual card used
+  authId?: string     // card rail: the card authorization id (the receipt reference)   // for a refund: the transaction of the refunded payment
   prevHash: string
   hash: string
 }
