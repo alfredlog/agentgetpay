@@ -248,7 +248,7 @@ async function refresh() {
       return `<div class="card agent">
         <div class="top"><span class="name">${esc(a.agentId)}${a.active === false ? '<span class="tag">Suspended</span>' : ''}</span><span class="amt">${eur(a.spentEur)} / ${eur(a.budgetEur)} today</span></div>
         <div class="bar ${pct >= 100 ? 'full' : ''}"><div style="width:${pct}%"></div></div>
-        <div class="rules">Max ${eur(a.maxPerPaymentEur)} per payment · approval above ${eur(a.approvalAboveEur)} · ${a.allowedDomains.map(esc).join(', ')}</div>
+        <div class="rules">${a.monthlyBudgetEur !== undefined ? `${eur(a.spentMonthEur)} / ${eur(a.monthlyBudgetEur)} this month · ` : ''}Max ${eur(a.maxPerPaymentEur)} per payment · approval above ${eur(a.approvalAboveEur)} · ${a.allowedDomains.map(esc).join(', ')}${a.categories?.length ? ` · buys: ${a.categories.map(esc).join(', ')}` : ''}</div>
       </div>`
     }).join('')
 
@@ -261,7 +261,7 @@ async function refresh() {
       return `<tr class="${e.seq > seen && seen ? 'new' : ''}">
         <td class="muted">${when(e.ts)}</td>
         <td>${esc(e.agentId)}</td>
-        <td>${isAdmin ? '<span class="muted">Settings</span>' : esc(service(e.url))}</td>
+        <td>${isAdmin ? '<span class="muted">Settings</span>' : e.order ? `<b>${esc(e.order.merchant)}</b><br><span class="muted">${esc(e.order.category)} · ${e.order.items.map(i => `${i.quantity}× ${esc(i.name)}`).join(', ')}</span>` : esc(service(e.url))}</td>
         <td class="num">${isAdmin ? '<span class="muted">—</span>' : eur(e.amountEur)}</td>
         <td><span class="badge b-${e.decision}">${label[e.decision] ?? e.decision}</span></td>
         <td class="muted">${details}</td>

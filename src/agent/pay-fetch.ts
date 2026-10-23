@@ -1,7 +1,7 @@
 // Le côté AGENT : un fetch() qui sait payer automatiquement une réponse 402.
 // À l'étape 3, ce code deviendra le Payment proxy, avec le moteur de règles branché sur `beforePay`.
 import { Transaction, P2PKH, LockingScript } from '@bsv/sdk'
-import { NETWORK, PaymentRequired, PaymentPayload, PaymentResponse, encode, decode } from '../shared/x402.js'
+import { NETWORK, PaymentRequired, PaymentPayload, PaymentResponse, OrderInfo, encode, decode } from '../shared/x402.js'
 import { UtxoProvider } from '../shared/utxo.js'
 import { Mutex } from '../shared/mutex.js'
 
@@ -12,7 +12,7 @@ export interface PayFetchOptions {
   unlocker: () => Unlocker // signe les entrées ; la clé reste dans le KeyStore
   utxos: UtxoProvider
   maxSats?: number // garde-fou simple, remplacé par le moteur de règles à l'étape 3
-  beforePay?: (offer: { url: string; amount: number; payTo: string }) => Promise<boolean>
+  beforePay?: (offer: { url: string; amount: number; payTo: string; order?: OrderInfo }) => Promise<boolean>
   spendLock?: Mutex                // un seul paiement à la fois dépense le portefeuille
   onSpent?: (tx: Transaction) => void // appelé dans le verrou quand le vendeur a accepté
 }
@@ -20,6 +20,23 @@ export interface PayFetchOptions {
 export interface PayFetchResult {
   response: Response
   paid?: { amount: number; txid: string; tx: Transaction }
+}
+
+// Description de commande envoyée par le marchand : on ne garde qu'une forme valide et de taille raisonnable
+export function validOrder(o: unknown): OrderInfo | undefined {
+  const x = o as OrderInfo | undefined
+  if (!x || typeof x !== 'object' || typeof x.merchant !== 'string' || typeof x.category !== 'string' || !Array.isArray(x.items)) return undefined
+  if (x.items.length > 100) return undefined
+  const items = x.items.map(i => ({
+    name: String(i?.name ?? '').slice(0, 120), quantity: Number(i?.quantity), unitPriceSats: Number(i?.unitPriceSats),
+    ...(i?.unit ? { unit: String(i.unit).slice(0, 20) } : {})
+  }))
+  if (items.some(i => !Number.isInteger(i.quantity) || i.quantity < 1 || !Number.isInteger(i.unitPriceSats) || i.unitPriceSats < 0)) return undefined
+  const s = x.shipTo
+  const shipTo = s && typeof s === 'object'
+    ? { ...(s.name ? { name: String(s.name).slice(0, 80) } : {}), street: String(s.street ?? '').slice(0, 120), postalCode: String(s.postalCode ?? '').slice(0, 12), city: String(s.city ?? '').slice(0, 80), country: String(s.country ?? '').slice(0, 2).toUpperCase() }
+    : undefined
+  return { merchant: x.merchant.slice(0, 80), category: x.category.toLowerCase().replace(/[^a-z0-9.]/g, '').slice(0, 60), items, ...(shipTo ? { shipTo } : {}) }
 }
 
 export async function payFetch(url: string, init: RequestInit, opts: PayFetchOptions): Promise<PayFetchResult> {
@@ -39,7 +56,7 @@ export async function payFetch(url: string, init: RequestInit, opts: PayFetchOpt
   if (opts.maxSats !== undefined && amount > opts.maxSats) {
     throw new Error(`Price ${amount} sats > limit ${opts.maxSats} sats: payment refused`)
   }
-  if (opts.beforePay && !(await opts.beforePay({ url, amount, payTo: req.payTo }))) {
+  if (opts.beforePay && !(await opts.beforePay({ url, amount, payTo: req.payTo, order: validOrder(offer.extensions?.order) }))) {
     throw new Error('Payment refused by beforePay rule')
   }
 
