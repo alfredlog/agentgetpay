@@ -39,6 +39,13 @@ const eur = (v: number) => v.toFixed(2).replace('.', ',') // DATEV : virgule dé
 // Seuls les paiements réellement effectués (avec une transaction) sont comptabilisés
 export const paidInMonth = (entries: LedgerEntry[], month: string) =>
   entries.filter(e => e.decision === 'allow' && e.txid && monthOf(e.ts) === month)
+// Paiements ET remboursements du mois (un remboursement est une écriture au crédit)
+export const bookedInMonth = (entries: LedgerEntry[], month: string) =>
+  entries.filter(e => (e.decision === 'allow' || e.decision === 'refund') && e.txid && monthOf(e.ts) === month)
+const label = (e: LedgerEntry) => {
+  if (e.order) return `${e.order.merchant} ${e.order.category}`
+  try { const u = new URL(e.url); return `${u.host}${u.pathname}` } catch { return e.url }
+}
 
 export class DatevExporter implements AccountingExporter {
   constructor(private cfg: AccountingConfig) {}
@@ -66,13 +73,13 @@ export class DatevExporter implements AccountingExporter {
       'Belegfeld 1', 'Belegfeld 2', 'Skonto', 'Buchungstext'
     ].join(';')
 
-    // Lignes suivantes : une écriture par paiement
-    const rows = paidInMonth(entries, month).map(e => {
+    // Lignes suivantes : une écriture par paiement (S = débit) et par remboursement (H = crédit)
+    const rows = bookedInMonth(entries, month).map(e => {
       const b = berlin(e.ts)
-      const service = new URL(e.url)
-      const text = ascii(`AI ${e.agentId} ${service.host}${service.pathname}`).slice(0, 60)
+      const refund = e.decision === 'refund'
+      const text = ascii(`${refund ? 'Refund ' : ''}AI ${e.agentId} ${label(e)}`).slice(0, 60)
       return [
-        eur(e.amountEur), q('S'), q('EUR'), '', '', q(''),
+        eur(e.amountEur), q(refund ? 'H' : 'S'), q('EUR'), '', '', q(''),
         this.cfg.expenseAccount, this.cfg.walletAccount, q(''),
         `${b.d}${b.m}`,                       // Belegdatum (TTMM)
         q(`AGP-${e.seq}`),                    // Belegfeld 1 : numéro de pièce = entrée du journal
@@ -90,14 +97,15 @@ export class DatevExporter implements AccountingExporter {
 
 // ---- Relevé mensuel lisible (le "Beleg" pour le comptable), avec les preuves blockchain ----
 export function monthlyStatementHtml(entries: LedgerEntry[], anchors: Anchor[], month: string, cfg: AccountingConfig) {
-  const paid = paidInMonth(entries, month)
-  const total = paid.reduce((s, e) => s + e.amountEur, 0)
+  const paid = bookedInMonth(entries, month)
+  const sign = (e: LedgerEntry) => (e.decision === 'refund' ? -1 : 1)
+  const total = paid.reduce((s, e) => s + sign(e) * e.amountEur, 0)
   const lastSeq = paid.at(-1)?.seq ?? 0
   const seal = anchors.find(a => a.seq >= lastSeq)
   const esc = (s: unknown) => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!))
   const date = (ts: string) => { const b = berlin(ts); return `${b.d}.${b.m}.${b.y} ${b.H}:${b.M}` }
   const byAgent = new Map<string, number>()
-  for (const e of paid) byAgent.set(e.agentId, (byAgent.get(e.agentId) ?? 0) + e.amountEur)
+  for (const e of paid) byAgent.set(e.agentId, (byAgent.get(e.agentId) ?? 0) + sign(e) * e.amountEur)
 
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Statement ${esc(month)}</title>
 <style>
@@ -112,16 +120,16 @@ export function monthlyStatementHtml(entries: LedgerEntry[], anchors: Anchor[], 
   a { color: #2f4fd8; } @media print { a { color: inherit; text-decoration: none; } }
 </style></head><body>
 <h1>AI agent spending statement — ${esc(month)}</h1>
-<div class="muted">${esc(cfg.companyName)} · generated ${esc(date(new Date().toISOString()))} · ${paid.length} payment(s) · amounts in EUR</div>
+<div class="muted">${esc(cfg.companyName)} · generated ${esc(date(new Date().toISOString()))} · ${paid.filter(e => e.decision === 'allow').length} payment(s)${paid.some(e => e.decision === 'refund') ? `, ${paid.filter(e => e.decision === 'refund').length} refund(s)` : ''} · amounts in EUR</div>
 
 <table>
   <thead><tr><th>Voucher</th><th>Date</th><th>Agent</th><th>Service</th><th>Purpose</th><th>Approved by</th><th class="num">Amount</th><th>BSV transaction</th></tr></thead>
   <tbody>
   ${paid.map(e => `<tr><td>AGP-${e.seq}</td><td>${esc(date(e.ts))}</td><td>${esc(e.agentId)}</td>
-    <td>${esc(new URL(e.url).host + new URL(e.url).pathname)}</td><td>${esc(e.purpose)}</td>
-    <td>${esc(e.approvedBy ?? 'Within policy')}</td><td class="num">€${e.amountEur.toFixed(2)}</td>
+    <td>${esc(e.decision === 'refund' ? `Refund · ${label(e)}` : label(e))}</td><td>${esc(e.purpose)}</td>
+    <td>${esc(e.decision === 'refund' ? '—' : e.approvedBy ?? 'Within policy')}</td><td class="num">${e.decision === 'refund' ? '−' : ''}€${e.amountEur.toFixed(2)}</td>
     <td><a href="https://test.whatsonchain.com/tx/${e.txid}">${e.txid!.slice(0, 12)}…</a></td></tr>`).join('')}
-  <tr class="total"><td colspan="6">Total</td><td class="num">€${total.toFixed(2)}</td><td></td></tr>
+  <tr class="total"><td colspan="6">Net total</td><td class="num">€${total.toFixed(2)}</td><td></td></tr>
   </tbody>
 </table>
 
