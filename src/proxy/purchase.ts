@@ -16,7 +16,7 @@ import type { ChainedUtxoProvider } from '../shared/utxo.js'
 import type { Mutex } from '../shared/mutex.js'
 import { decode, type OrderInfo } from '../shared/x402.js'
 import type { JsonPolicyEngine } from './policy.js'
-import { fmt } from './policy.js'
+import { fmt, methodsOf } from './policy.js'
 import type { MemoryBudgetStore } from './budget.js'
 import { monthOf } from './budget.js'
 import type { Decision, Ledger, LedgerEntry, KeyStore } from './types.js'
@@ -44,6 +44,7 @@ export interface PurchaseDeps {
   approvalTtlHours: number
   publicBase: string // for the result link given to the agent
   cards?: CardRail   // card rail (virtual cards), if enabled
+  acceptsBsv?: (domain: string) => boolean // is this merchant known to accept BSV? (catalog, past payments)
 }
 
 export interface PurchaseInput {
@@ -336,8 +337,12 @@ export function createPurchaseEngine(d: PurchaseDeps) {
       console.log(`✘ ${agentId} card for ${t.merchantName}: ${reason}`)
       return { kind: 'refused' as const, reason }
     }
-    let decision = await d.policy.evaluate({ agentId, url, amountSats, amountEur: eur(amountSats), purpose, order })
+    let decision = await d.policy.evaluate({ agentId, url, amountSats, amountEur: eur(amountSats), purpose, order, rail: 'card' })
     const rules = d.policy.rulesFor(agentId)
+    // BSV first (company setting, on by default): no card where BSV is accepted
+    if (decision.kind !== 'deny' && rules && rules.card_only_if_no_bsv !== false && methodsOf(rules).includes('bsv') && d.acceptsBsv?.(t.merchantDomain)) {
+      decision = { kind: 'deny', reason: `${t.merchantDomain} accepts BSV: pay with pay_and_fetch instead of a card (company rule: BSV first)` }
+    }
     // The card limit (price + tolerance) is what could really be charged: it must respect the per-payment maximum
     if (decision.kind !== 'deny' && rules && t.limitEur > rules.max_per_payment_eur) decision = { kind: 'deny', reason: `Card limit ${fmt(t.limitEur)} exceeds max per payment (${fmt(rules.max_per_payment_eur)})` }
     if (decision.kind === 'deny') return refuse(decision.reason)

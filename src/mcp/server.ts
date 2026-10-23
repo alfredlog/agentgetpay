@@ -176,6 +176,8 @@ function buildServer(apiKey: string, ctx: Ctx = { ws: WORKSPACE }) {
       `Max per payment: ${eur(m.rules?.max_per_payment_eur ?? 0)} · human approval above ${eur(m.rules?.approval_above_eur ?? 0)}`,
       `Allowed domains: ${(m.rules?.allowed_domains ?? []).join(', ')}`,
       ...(m.mandates?.length ? [`Active standing approvals: ${m.mandates.map((x: any) => `${x.id} ${x.domain}${x.category ? ` ${x.category}` : ''} up to ${eur(x.maxEurPerMonth)}/month (${eur(x.usedThisMonthEur)} used)`).join('; ')}`] : []),
+      `You may pay with: ${(m.rules?.payment_methods?.length ? m.rules.payment_methods : ['bsv']).map((x: string) => x === 'bsv' ? 'BSV (pay_and_fetch)' : `virtual cards (request_virtual_card)${m.rules?.card_categories?.length ? ` only for ${m.rules.card_categories.join(', ')}` : ''}`).join(' and ')}` +
+        (m.rules?.card_only_if_no_bsv !== false && (m.rules?.payment_methods ?? []).includes('card') ? '. Company rule: BSV first, no card where the merchant accepts BSV.' : '.'),
       'Recent operations:',
       ...m.recent.map((e: any) => `- ${new Date(e.time).toLocaleString('en-GB', { timeZone: 'Europe/Berlin', dateStyle: 'short', timeStyle: 'short' })} ${e.decision} ${eur(e.amountEur)} ${e.url}${e.reason ? ` (${e.reason})` : ''}`)
     ]
@@ -284,7 +286,7 @@ function buildServer(apiKey: string, ctx: Ctx = { ws: WORKSPACE }) {
 
   server.registerTool('request_virtual_card', {
     title: 'Ask for a virtual card',
-    description: 'For merchants that do not accept BSV (hotels, airlines, shops paid by card): asks the company for a single-use virtual card, limited to one merchant and one amount. The company rules and approvals apply exactly like for BSV payments; every charge is checked in real time. If a human must approve, you get a request id: continue with other work and use check_request later to get the card.',
+    description: 'Only if your company allows cards for you (see check_budget) and only for merchants that do not accept BSV (hotels, airlines, shops paid by card): asks the company for a single-use virtual card, limited to one merchant and one amount. The company rules and approvals apply exactly like for BSV payments; every charge is checked in real time. If a human must approve, you get a request id: continue with other work and use check_request later to get the card.',
     inputSchema: {
       merchant_name: z.string().min(2).describe('Merchant name, e.g. City Lodge München'),
       merchant_domain: z.string().describe('Merchant domain (must be one of your allowed domains), e.g. shop.example.com'),
