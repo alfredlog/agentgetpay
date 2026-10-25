@@ -33,7 +33,10 @@ const PORT = Number(process.env.PROXY_PORT ?? 5050)
 const HOST = process.env.PROXY_HOST ?? '127.0.0.1'
 const truthy = (v: string | undefined) => ['1', 'true', 'yes', 'on'].includes(String(v ?? '').trim().toLowerCase())
 // Behind a web server (Caddy, nginx), the proxy listens on 127.0.0.1 but is PUBLIC: PROXY_PUBLIC=true says so.
-const EXPOSED = !['127.0.0.1', 'localhost', '::1'].includes(HOST) || truthy(process.env.PROXY_PUBLIC)
+// In Docker the proxy listens on 0.0.0.0 inside the container, but the port is published on the host's
+// 127.0.0.1 only: PROXY_PUBLIC=false says the proxy is still private and keeps local mode.
+const explicitlyPrivate = ['0', 'false', 'no', 'off'].includes(String(process.env.PROXY_PUBLIC ?? '').trim().toLowerCase())
+const EXPOSED = explicitlyPrivate ? false : !['127.0.0.1', 'localhost', '::1'].includes(HOST) || truthy(process.env.PROXY_PUBLIC)
 // Public address of the proxy (e.g. agentpay.pdf-libre.de): an agent must never be able to call it
 const PUBLIC_HOST = (process.env.PROXY_PUBLIC_HOST ?? '').trim().toLowerCase()
 // Public demo: the dashboard can be viewed without a password (exports, anchoring and administration stay protected)

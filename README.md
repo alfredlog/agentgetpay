@@ -186,6 +186,29 @@ Daily spending is rebuilt from the audit log when the proxy starts, so restartin
 - **The proxy only listens on this computer** (`127.0.0.1`). To open it to the network (for example for a teammate), set `PROXY_HOST=0.0.0.0` in `.env`: the dashboard and exports then require the admin password, and the demo keys (`dev-…`, published in this repo) stop working. Issue new keys on the admin page.
 - The seller listens on this computer too (`SELLER_HOST` to change it).
 
+## Run with Docker
+
+The quickest way for a teammate to run everything on their own computer. Only Docker Desktop is required, no Node.js.
+
+```bash
+git clone https://github.com/alfredlog/agentgetpay.git
+cd agentgetpay
+docker compose up -d --build      # builds the image and starts proxy, MCP server and demo market
+docker compose logs -f            # shows the new wallet address (Ctrl+C to leave the logs)
+```
+
+On first start the container creates a **new** testnet wallet and all secrets in `docker-data/.env`. Each person gets their own wallet: never copy someone else's `.env`, and never share `docker-data/`.
+
+- Dashboard: http://localhost:5050. Admin page: http://localhost:5050/admin.html, with the password `ADMIN_TOKEN` from `docker-data/.env`.
+- MCP server: http://localhost:5070/mcp. For Claude Code: `claude mcp add --transport http agentgetpay http://localhost:5070/mcp`
+- Demo market: http://localhost:5080
+- Fund the wallet with a testnet faucet, then check it: `docker compose exec agentgetpay npm run balance`
+- Optional: a Telegram bot for approvals. Add `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` to `docker-data/.env` (use your own bot), then `docker compose restart`.
+- Front-end work: `public/index.html` (dashboard) and `public/admin.html` are read live from your folder, so edit them and reload the browser, no rebuild needed. To see them as on the server (login gate, private dashboard), add `PROXY_PUBLIC=true` to `docker-data/.env` and run `docker compose restart`; remove the line to go back to local mode.
+- Update: `git pull && docker compose up -d --build`. Stop: `docker compose down` (your data in `docker-data/` stays).
+
+The ports are published on `127.0.0.1` only, so the proxy stays private to that computer (`PROXY_PUBLIC=false` keeps local mode even though it listens on `0.0.0.0` inside the container).
+
 ## Deploy on a server
 
 `deploy/` contains a pm2 configuration, a Caddy block and a step-by-step guide: [deploy/DEPLOY.md](deploy/DEPLOY.md). Behind Caddy, set `PROXY_PUBLIC=true` so the proxy knows it is public even though it listens on `127.0.0.1`. In public mode the dashboard is private: only the administrator and the people they authorise can open it. The admin page creates read-only **access codes** (`agv_…`, shown once, stored hashed, revocable); they allow viewing the dashboard and downloading the exports, but not changing agents or anchoring. Every grant and revocation is recorded in the audit log. `DASHBOARD_PUBLIC_READ=true` makes the dashboard readable by anyone, for a public demo.
