@@ -1,0 +1,16 @@
+# Run AgentGetPay on your own computer:  docker compose up -d --build
+# Your wallet, passwords, rules and ledger are stored in ./docker-data (never share that folder).
+services:
+  agentgetpay:
+    build: .
+    container_name: agentgetpay
+    restart: unless-stopped
+    ports:
+      # 127.0.0.1 only: nobody else on your network can reach the proxy. Do not change this
+      # without setting PROXY_PUBLIC=true (admin password everywhere, demo keys refused).
+      - "127.0.0.1:5050:5050" # payment proxy + dashboard
+      - "127.0.0.1:5070:5070" # MCP server for AI assistants
+      - "127.0.0.1:5080:5080" # demo market
+    volumes:
+      - ./docker-data:/app/state
+    # Optional settings (Telegram bot, approval time, ...) go into docker-data/.env, see deploy/env.example
