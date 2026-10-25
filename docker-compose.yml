@@ -13,4 +13,6 @@ services:
       - "127.0.0.1:5080:5080" # demo market
     volumes:
       - ./docker-data:/app/state
+      # Front-end (dashboard and admin page) read live from your folder: edit public/*.html and reload the page
+      - ./public:/app/public:ro
     # Optional settings (Telegram bot, approval time, ...) go into docker-data/.env, see deploy/env.example

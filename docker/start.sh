@@ -17,6 +17,12 @@ for file in config.defaults/*.json; do
   fi
 done
 
+# PROXY_PUBLIC=true in docker-data/.env tests the public mode of the VPS (admin password, private dashboard).
+# The image sets PROXY_PUBLIC=false, so drop it here and let the .env value win.
+if grep -q '^PROXY_PUBLIC=' "$STATE/.env"; then
+  unset PROXY_PUBLIC
+fi
+
 TSX=node_modules/.bin/tsx
 
 # First start: create a NEW testnet wallet and the seller secret in .env
