@@ -204,6 +204,7 @@ On first start the container creates a **new** testnet wallet and all secrets in
 - Demo market: http://localhost:5080
 - Fund the wallet with a testnet faucet, then check it: `docker compose exec agentgetpay npm run balance`
 - Optional: a Telegram bot for approvals. Add `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` to `docker-data/.env` (use your own bot), then `docker compose restart`.
+- Front-end work: `public/index.html` (dashboard) and `public/admin.html` are read live from your folder, so edit them and reload the browser, no rebuild needed. To see them as on the server (login gate, private dashboard), add `PROXY_PUBLIC=true` to `docker-data/.env` and run `docker compose restart`; remove the line to go back to local mode.
 - Update: `git pull && docker compose up -d --build`. Stop: `docker compose down` (your data in `docker-data/` stays).
 
 The ports are published on `127.0.0.1` only, so the proxy stays private to that computer (`PROXY_PUBLIC=false` keeps local mode even though it listens on `0.0.0.0` inside the container).
