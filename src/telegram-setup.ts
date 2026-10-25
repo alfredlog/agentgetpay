@@ -1,0 +1,26 @@
+// Finds your Telegram chat_id and saves it in .env.
+// Before: create a bot with @BotFather, put TELEGRAM_BOT_TOKEN in .env, then send "hello" to your bot.
+import 'dotenv/config'
+import { appendFileSync, readFileSync } from 'node:fs'
+
+const token = process.env.TELEGRAM_BOT_TOKEN
+if (!token) throw new Error('Add TELEGRAM_BOT_TOKEN=... to .env (from @BotFather)')
+
+// allowed_updates=["message"]: the proxy asks Telegram to only send it button clicks,
+// and Telegram keeps that setting. We explicitly ask for messages again, otherwise "hello" would stay invisible.
+const res = await fetch(`https://api.telegram.org/bot${token}/getUpdates?allowed_updates=${encodeURIComponent('["message","callback_query"]')}`)
+const data = (await res.json()) as { ok: boolean; result: any[]; description?: string }
+if (!data.ok) throw new Error(`Token rejected by Telegram: ${data.description}`)
+
+const msg = data.result.map(u => u.message).filter(Boolean).at(-1)
+if (!msg) {
+  console.log('No message found. Send "hello" to your bot on Telegram, then run this command again.')
+  process.exit(1)
+}
+const chatId = String(msg.chat.id)
+if (readFileSync('.env', 'utf8').includes('TELEGRAM_CHAT_ID=')) {
+  console.log(`TELEGRAM_CHAT_ID is already in .env (yours is ${chatId}).`)
+} else {
+  appendFileSync('.env', `TELEGRAM_CHAT_ID=${chatId}\n`)
+  console.log(`Chat found (${msg.chat.first_name ?? msg.chat.title}) — TELEGRAM_CHAT_ID=${chatId} added to .env`)
+}

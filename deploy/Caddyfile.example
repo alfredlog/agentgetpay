@@ -1,0 +1,30 @@
+# Add to the VPS Caddyfile (usually /etc/caddy/Caddyfile), then: sudo systemctl reload caddy
+# Caddy obtains and renews the HTTPS certificate by itself.
+agentpay.pdf-libre.de {
+	encode gzip
+
+	# MCP server (AI assistants in HTTP mode)
+	handle /mcp {
+		reverse_proxy 127.0.0.1:5070
+	}
+
+	# Upload and download links for files of connected assistants
+	handle /files/* {
+		request_body {
+			max_size 30MB
+		}
+		reverse_proxy 127.0.0.1:5070
+	}
+
+	# Payment proxy, dashboard and administration
+	handle {
+		reverse_proxy 127.0.0.1:5050
+	}
+}
+
+# Demo market (fictional shops): a DIFFERENT host name than the proxy,
+# because an agent is never allowed to call the proxy's own address.
+shop.pdf-libre.de {
+	encode gzip
+	reverse_proxy 127.0.0.1:5080
+}

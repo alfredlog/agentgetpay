@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Admin</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #16181d; --muted: #6b7280; --line: #e5e7eb;
+    --ok: #0f7b4f; --ok-bg: #e7f6ee; --bad: #b42318; --bad-bg: #fdecea;
+    --warn: #8a5300; --warn-bg: #fff4dc; --accent: #2f4fd8; --bar: #e9ecf2; --input: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f1115; --card: #171a21; --text: #eceef2; --muted: #9aa1ad; --line: #262b35;
+      --ok: #4ad295; --ok-bg: #12301f; --bad: #ff8a80; --bad-bg: #3a1714;
+      --warn: #ffc163; --warn-bg: #33270d; --accent: #8ea2ff; --bar: #252a34; --input: #0f1115; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.5 -apple-system, "Segoe UI", Inter, sans-serif; background: var(--bg); color: var(--text); }
+  main { max-width: 1100px; margin: 0 auto; padding: 28px 20px 60px; }
+  header { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 24px; }
+  h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
+  h1 small { display: block; font-size: 13px; font-weight: 400; color: var(--muted); }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 28px 0 10px; font-weight: 600; }
+  a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 400px), 1fr)); gap: 12px; }
+  .top { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 12px; }
+  .name { font-weight: 600; font-size: 16px; }
+  .pill { padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .pill.ok { background: var(--ok-bg); color: var(--ok); } .pill.bad { background: var(--bad-bg); color: var(--bad); }
+  .meta { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+  .bar { height: 6px; background: var(--bar); border-radius: 99px; overflow: hidden; margin: 6px 0 14px; }
+  .bar > div { height: 100%; background: var(--accent); }
+  .bar.full > div { background: var(--bad); }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+  input { display: block; width: 100%; margin-top: 4px; font: inherit; font-size: 14px; padding: 7px 10px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--input); color: var(--text); }
+  input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+  button { font: inherit; font-size: 13px; font-weight: 600; padding: 7px 12px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--card); color: var(--text); cursor: pointer; }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover { opacity: .9; color: #fff; }
+  button.danger:hover { border-color: var(--bad); color: var(--bad); }
+  button:disabled { opacity: .5; cursor: wait; }
+  .msg { font-size: 13px; margin-top: 10px; min-height: 1em; }
+  .msg.ok { color: var(--ok); } .msg.bad { color: var(--bad); }
+  .key { margin-top: 10px; padding: 10px 12px; border-radius: 8px; background: var(--warn-bg); color: var(--warn); font-size: 13px; word-break: break-all; }
+  .key code { font-size: 13px; color: var(--text); }
+  #login { max-width: 420px; margin: 60px auto; }
+  .hint { color: var(--muted); font-size: 13px; }
+  .conns { border-top: 1px solid var(--line); margin-top: 14px; }
+  .conn { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 0; }
+  .key.pairbox { word-break: normal; } .key.pairbox code { word-break: break-all; }
+  code.pair { font-size: 22px; letter-spacing: .12em; font-weight: 700; }
+  .hidden { display: none; }
+  .pay { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin: 2px 0 10px; }
+  label.chk { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); margin-bottom: 6px; }
+  label.chk input { width: auto; margin: 0; }
+  details.rules { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin: 2px 0 12px; }
+  details.rules summary { cursor: pointer; font-size: 13px; font-weight: 600; }
+  details.rules .hint { margin: 6px 0; font-size: 12px; } details.rules code { font-size: 12px; }
+  .sub { font-size: 12px; font-weight: 600; margin: 10px 0 4px; }
+  .cat, .addr { display: grid; gap: 6px; align-items: center; margin-bottom: 6px; }
+  .cat { grid-template-columns: 1.6fr 1fr 1fr 1fr 28px; } .addr { grid-template-columns: 2fr 1fr 1.2fr 46px 28px; }
+  .cat.head span { font-size: 11px; color: var(--muted); }
+  .cat input, .addr input { margin-top: 0; padding: 5px 7px; font-size: 13px; }
+  button.x { padding: 4px 0; width: 28px; font-size: 12px; }
+  details.rules > button { font-size: 12px; padding: 4px 10px; }
+  @media (max-width: 520px) { .row { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Agent administration<small>Budgets, limits and access for each AI agent · every change is recorded in the audit log</small></h1>
+    <span><a href="/">← Dashboard</a> <span id="who" class="hint"></span></span>
+  </header>
+
+  <section id="login" class="card hidden">
+    <div class="name" style="margin-bottom:12px">Sign in</div>
+    <label>Your name (shown in the audit log)<input id="l-name" autocomplete="name" placeholder="Alfred"></label>
+    <label>Admin password (ADMIN_TOKEN in .env)<input id="l-token" type="password" autocomplete="current-password"></label>
+    <button class="primary" id="l-btn">Sign in</button>
+    <div id="l-msg" class="msg bad"></div>
+  </section>
+
+  <div id="app" class="hidden">
+    <h2>Agents</h2>
+    <section class="grid" id="agents"></section>
+
+    <h2>Add an agent</h2>
+    <section class="card" style="max-width:560px">
+      <label>Agent name (lowercase, digits, dashes)<input id="n-id" placeholder="marketing-01"></label>
+      <div class="row">
+        <label>Daily budget €<input id="n-daily" type="number" step="0.01" min="0.01" value="1"></label>
+        <label>Max per payment €<input id="n-max" type="number" step="0.01" min="0.01" value="0.5"></label>
+        <label>Approval above €<input id="n-appr" type="number" step="0.01" min="0" value="0.25"></label>
+      </div>
+      <label>Allowed domains (comma-separated)<input id="n-domains" value="localhost"></label>
+      <button class="primary" id="n-btn">Create agent</button>
+      <div id="n-msg" class="msg"></div>
+      <div id="n-key"></div>
+    </section>
+
+    <h2>Virtual cards</h2>
+    <section class="card" style="max-width:760px">
+      <div class="meta" style="margin-bottom:10px">Single-use cards issued to agents for merchants that do not accept BSV. Each one is limited to one merchant and one amount; every charge is checked in real time.</div>
+      <div id="k-list"></div>
+    </section>
+
+    <h2>Standing approvals (mandates)</h2>
+    <section class="card" style="max-width:760px">
+      <div class="meta" style="margin-bottom:10px">Recurring purchases approved once (subscriptions…). Matching payments no longer wait for approval; budgets and other rules still apply. Agents ask for them; you approve them on Telegram or the dashboard.</div>
+      <div id="m-list"></div>
+    </section>
+
+    <h2>Dashboard access</h2>
+    <section class="card" style="max-width:560px">
+      <div class="meta" style="margin-bottom:10px">People who can <b>view</b> the dashboard and download the exports (for example your accountant). They cannot change agents or rules.</div>
+      <div id="v-list"></div>
+      <label>Name<input id="v-name" placeholder="Steuerberater Müller"></label>
+      <button class="primary" id="v-btn">Give access</button>
+      <div id="v-msg" class="msg"></div>
+      <div id="v-code"></div>
+    </section>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id)
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+const eur = v => '€' + Number(v).toFixed(2)
+const store = { get: k => { try { return sessionStorage.getItem(k) } catch { return null } },
+                set: (k, v) => { try { sessionStorage.setItem(k, v) } catch {} },
+                del: k => { try { sessionStorage.removeItem(k) } catch {} } }
+let auth = { token: store.get('agp-token') || '', name: store.get('agp-name') || '' }
+
+async function api(path, method = 'GET', body) {
+  const res = await fetch('/v1/admin' + path, {
+    method,
+    headers: { 'Content-Type': 'application/json', 'X-Admin-Token': auth.token, 'X-Admin-Name': auth.name },
+    body: body ? JSON.stringify(body) : undefined
+  })
+  const data = await res.json().catch(() => ({}))
+  if (res.status === 401) { showLogin('Wrong admin password'); throw new Error('unauthorized') }
+  if (!res.ok) throw new Error(data.error || 'Request failed')
+  return data
+}
+
+function showLogin(msg = '') {
+  $('login').classList.remove('hidden'); $('app').classList.add('hidden')
+  $('l-name').value = auth.name; $('l-msg').textContent = msg; $('who').textContent = ''
+}
+
+async function signIn() {
+  const name = $('l-name').value.trim(), token = $('l-token').value.trim()
+  if (!name) { $('l-msg').textContent = 'Enter your name first'; return }
+  if (!token) { $('l-msg').textContent = 'Enter the admin password'; return }
+  auth = { name, token }
+  try { await load(); store.set('agp-token', token); store.set('agp-name', name) } catch {}
+}
+$('l-btn').onclick = signIn
+$('l-token').onkeydown = e => { if (e.key === 'Enter') signIn() }
+$('l-name').oninput = $('l-token').oninput = () => { $('l-msg').textContent = '' }
+
+let connections = []
+const ago = ts => { const m = Math.round((Date.now() - Date.parse(ts)) / 60000); return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : new Date(ts).toLocaleDateString() }
+
+async function load() {
+  const [agents, conns] = await Promise.all([api('/agents'), api('/connections')])
+  connections = conns
+  $('login').classList.add('hidden'); $('app').classList.remove('hidden')
+  $('who').innerHTML = ` · signed in as <b>${esc(auth.name)}</b> · <a href="#" id="logout">sign out</a>`
+  $('logout').onclick = e => { e.preventDefault(); store.del('agp-token'); auth.token = ''; showLogin() }
+  $('agents').innerHTML = agents.map(card).join('')
+  for (const a of agents) wire(a)
+  await loadViewers()
+  await loadMandates()
+  await loadCards()
+}
+
+async function loadCards() {
+  const list = await api('/cards')
+  const pill = { active: 'ok', used: '', expired: 'bad', cancelled: 'bad' }
+  $('k-list').innerHTML = list.length ? list.slice(0, 30).map(c => `<div class="top" style="padding:6px 0;border-bottom:1px solid var(--line);margin:0">
+      <span><b>•••• ${esc(c.last4)}</b> · ${esc(c.agentId)} → ${esc(c.merchantName)} <span class="hint">(${esc(c.merchantDomain)}${c.category ? ` · ${esc(c.category)}` : ''})</span><br>
+      <span class="hint">limit ${eur(c.limitEur)}${c.authorizedEur !== undefined ? ` · charged ${eur(c.authorizedEur)}` : ''}${c.declines ? ` · ${c.declines} declined attempt(s)` : ''} · ${c.approvedBy ? `approved by ${esc(c.approvedBy)}` : 'within policy'} · valid until ${new Date(c.validUntil).toLocaleDateString()}</span></span>
+      ${c.status === 'active' ? `<button class="danger" data-kcancel="${esc(c.cardId)}">Cancel</button>` : `<span class="pill ${pill[c.status] ?? ''}">${esc(c.status)}</span>`}</div>`).join('')
+    : '<div class="hint">No virtual card yet.</div>'
+  $('k-list').querySelectorAll('[data-kcancel]').forEach(b => b.onclick = async () => {
+    b.disabled = true
+    try { await api('/cards/' + b.dataset.kcancel, 'DELETE'); await loadCards() } catch (e) { b.disabled = false }
+  })
+}
+
+async function loadMandates() {
+  const list = await api('/mandates')
+  $('m-list').innerHTML = list.length ? list.map(m => `<div class="top" style="padding:6px 0;border-bottom:1px solid var(--line);margin:0">
+      <span><b>${esc(m.id)}</b> · ${esc(m.agentId)} → ${esc(m.domain)}${m.category ? ` (${esc(m.category)})` : ''}<br>
+      <span class="hint">${eur(m.usedThisMonthEur)} of ${eur(m.maxEurPerMonth)} this month · approved by ${esc(m.approvedBy)} · ${m.active ? `until ${new Date(m.validUntil).toLocaleDateString()}` : m.revokedAt ? `revoked by ${esc(m.revokedBy)}` : 'expired'}</span></span>
+      ${m.active ? `<button class="danger" data-mrevoke="${esc(m.id)}">Revoke</button>` : '<span class="pill bad">Inactive</span>'}</div>`).join('')
+    : '<div class="hint">No standing approval yet.</div>'
+  $('m-list').querySelectorAll('[data-mrevoke]').forEach(b => b.onclick = async () => {
+    b.disabled = true
+    try { await api('/mandates/' + b.dataset.mrevoke, 'DELETE'); await loadMandates() } catch (e) { b.disabled = false }
+  })
+}
+
+// Read-only dashboard access
+async function loadViewers() {
+  const list = await api('/viewers')
+  $('v-list').innerHTML = list.length ? list.map(v => `<div class="top" style="padding:6px 0;border-bottom:1px solid var(--line)">
+      <span><b>${esc(v.name)}</b> <span class="hint">· code …${esc(v.keyHint)} · since ${new Date(v.createdAt).toLocaleDateString()}</span></span>
+      <button class="danger" data-revoke="${esc(v.id)}">Revoke</button></div>`).join('')
+    : '<div class="hint" style="margin-bottom:10px">Nobody else has access yet.</div>'
+  $('v-list').querySelectorAll('[data-revoke]').forEach(b => b.onclick = async () => {
+    b.disabled = true
+    try { await api('/viewers/' + b.dataset.revoke, 'DELETE'); $('v-code').innerHTML = ''; await loadViewers() }
+    catch (e) { b.disabled = false; if (e.message !== 'unauthorized') { $('v-msg').className = 'msg bad'; $('v-msg').textContent = e.message } }
+  })
+}
+$('v-btn').onclick = async () => {
+  const b = $('v-btn'), m = $('v-msg')
+  const name = $('v-name').value.trim()
+  if (!name) { m.className = 'msg bad'; m.textContent = 'Enter the name of the person'; return }
+  b.disabled = true; $('v-code').innerHTML = ''
+  try {
+    const r = await api('/viewers', 'POST', { name })
+    m.className = 'msg ok'; m.textContent = `Access given to ${r.viewer.name}`
+    $('v-code').innerHTML = `<div class="key">Access code for <b>${esc(r.viewer.name)}</b>, shown <b>only once</b>. Send it with the dashboard link:<br><code>${esc(r.code)}</code></div>`
+    $('v-name').value = ''
+    await loadViewers()
+  } catch (e) { if (e.message !== 'unauthorized') { m.className = 'msg bad'; m.textContent = e.message } } finally { b.disabled = false }
+}
+$('v-name').oninput = () => { $('v-msg').textContent = '' }
+
+const pm = r => (r.payment_methods && r.payment_methods.length ? r.payment_methods : ['bsv'])
+const catRow = (k = '', v = {}) => `<div class="cat" data-cat>
+  <input data-k="name" placeholder="travel.hotel" value="${esc(k)}">
+  <input data-k="max_unit_price_eur" type="number" step="0.01" min="0.01" placeholder="—" value="${v.max_unit_price_eur ?? ''}">
+  <input data-k="monthly_budget_eur" type="number" step="0.01" min="0.01" placeholder="—" value="${v.monthly_budget_eur ?? ''}">
+  <input data-k="approval_above_eur" type="number" step="0.01" min="0" placeholder="—" value="${v.approval_above_eur ?? ''}">
+  <button type="button" class="x" data-remove title="Remove">✕</button></div>`
+const addrRow = (a = {}) => `<div class="addr" data-addr>
+  <input data-k="street" placeholder="Street and number" value="${esc(a.street ?? '')}">
+  <input data-k="postalCode" placeholder="Postcode" value="${esc(a.postalCode ?? '')}">
+  <input data-k="city" placeholder="City" value="${esc(a.city ?? '')}">
+  <input data-k="country" placeholder="DE" maxlength="2" value="${esc(a.country ?? '')}">
+  <button type="button" class="x" data-remove title="Remove">✕</button></div>`
+
+function card(a) {
+  const r = a.rules || { daily_budget_eur: 0, max_per_payment_eur: 0, approval_above_eur: 0, allowed_domains: [] }
+  const pct = r.daily_budget_eur ? Math.min(100, a.spentEur / r.daily_budget_eur * 100) : 0
+  return `<div class="card" id="c-${a.id}">
+    <div class="top"><span class="name">${esc(a.id)}</span>
+      <span class="pill ${a.active ? 'ok' : 'bad'}">${a.active ? 'Active' : 'Suspended'}</span></div>
+    <div class="meta">${eur(a.spentEur)} spent today · ${eur(a.spentMonthEur || 0)} this month${a.keyHint ? ` · API key …${esc(a.keyHint)}` : ''}</div>
+    <div class="bar ${pct >= 100 ? 'full' : ''}"><div style="width:${pct}%"></div></div>
+    <div class="row">
+      <label>Daily budget €<input data-f="daily_budget_eur" type="number" step="0.01" min="0.01" value="${r.daily_budget_eur}"></label>
+      <label>Max per payment €<input data-f="max_per_payment_eur" type="number" step="0.01" min="0.01" value="${r.max_per_payment_eur}"></label>
+      <label>Approval above €<input data-f="approval_above_eur" type="number" step="0.01" min="0" value="${r.approval_above_eur}"></label>
+    </div>
+    <div class="row">
+      <label>Monthly budget €<input data-f="monthly_budget_eur" type="number" step="0.01" min="0.01" placeholder="no limit" value="${r.monthly_budget_eur ?? ''}"></label>
+    </div>
+    <label>Allowed domains (comma-separated)<input data-f="allowed_domains" value="${esc(r.allowed_domains.join(', '))}"></label>
+    <div class="pay">
+      <div class="sub" style="margin-top:0">How this agent may pay <span class="hint">(the company decides, not the AI)</span></div>
+      <label class="chk"><input type="checkbox" data-pm="bsv" ${pm(r).includes('bsv') ? 'checked' : ''}> BSV (HTTP 402)</label>
+      <label class="chk"><input type="checkbox" data-pm="card" ${pm(r).includes('card') ? 'checked' : ''}> Virtual cards</label>
+      <label class="chk"><input type="checkbox" data-f2="card_only_if_no_bsv" ${r.card_only_if_no_bsv === false ? '' : 'checked'}> BSV first: no card where the merchant accepts BSV</label>
+      <label>Cards only for categories (comma-separated, empty = any allowed)<input data-f="card_categories" placeholder="travel" value="${esc((r.card_categories || []).join(', '))}"></label>
+    </div>
+    <details class="rules" ${r.categories || r.shipping_addresses ? 'open' : ''}>
+      <summary>Purchase rules ${r.categories ? `· ${Object.keys(r.categories).length} categories` : '· all categories allowed'}${r.shipping_addresses ? ` · ${r.shipping_addresses.length} delivery address${r.shipping_addresses.length > 1 ? 'es' : ''}` : ''}</summary>
+      <div class="hint">Applied when a merchant describes what it sells. If you list categories, only those can be bought. Category <code>travel</code> also covers <code>travel.hotel</code>.</div>
+      <div class="sub">Categories</div>
+      <div class="cat head"><span>Category</span><span>Max per unit €</span><span>Per month €</span><span>Approval above €</span><span></span></div>
+      <div data-cats>${Object.entries(r.categories || {}).map(([k, v]) => catRow(k, v)).join('')}</div>
+      <button type="button" data-a="add-cat">+ Category</button>
+      <div class="sub">Delivery addresses <span class="hint">(goods can only be shipped here)</span></div>
+      <div data-addrs>${(r.shipping_addresses || []).map(addrRow).join('')}</div>
+      <button type="button" data-a="add-addr">+ Address</button>
+    </details>
+    <div class="actions">
+      <button class="primary" data-a="save">Save rules</button>
+      <button data-a="reset">Reset today's spending</button>
+      <button data-a="key">New API key</button>
+      <button class="danger" data-a="status">${a.active ? 'Suspend' : 'Reactivate'}</button>
+    </div>
+    <div class="msg" data-msg></div><div data-key></div>
+    <div class="conns">
+      <div class="top" style="margin:14px 0 6px"><span class="hint">Connected assistants</span><button data-a="pair">Connect an assistant</button></div>
+      ${connections.filter(g => g.agentId === a.id).map(g => `<div class="conn"><span><b>${esc(g.clientName)}</b> <span class="hint">· since ${new Date(g.createdAt).toLocaleDateString()} · used ${ago(g.lastUsedAt)}</span></span><button class="danger" data-revoke="${esc(g.id)}">Disconnect</button></div>`).join('') || '<div class="hint">None yet.</div>'}
+      <div data-pair></div>
+    </div>
+  </div>`
+}
+
+function wire(a) {
+  const c = $('c-' + a.id)
+  const msg = (text, ok = true) => { const m = c.querySelector('[data-msg]'); m.className = 'msg ' + (ok ? 'ok' : 'bad'); m.textContent = text }
+  const val = f => c.querySelector(`[data-f="${f}"]`).value
+  c.querySelectorAll('input').forEach(i => i.oninput = () => msg(''))
+  const run = async (btn, fn) => {
+    btn.disabled = true
+    try { await fn() } catch (e) { if (e.message !== 'unauthorized') msg(e.message, false) } finally { btn.disabled = false }
+  }
+  c.querySelector('[data-a="save"]').onclick = e => run(e.target, async () => {
+    for (const f of ['daily_budget_eur', 'max_per_payment_eur', 'approval_above_eur'])
+      if (val(f) === '') throw new Error('Fill in every amount')
+    const fields = row => Object.fromEntries([...row.querySelectorAll('[data-k]')].map(i => [i.dataset.k, i.value.trim()]))
+    const categories = {}
+    for (const row of c.querySelectorAll('[data-cat]')) {
+      const { name, ...v } = fields(row)
+      if (!name) { if (Object.values(v).some(Boolean)) throw new Error('Give each category a name, e.g. travel.hotel'); continue }
+      categories[name] = v
+    }
+    const shipping_addresses = [...c.querySelectorAll('[data-addr]')].map(fields).filter(x => Object.values(x).some(Boolean))
+    const r = await api('/agents/' + a.id, 'PUT', { rules: {
+      daily_budget_eur: val('daily_budget_eur'), max_per_payment_eur: val('max_per_payment_eur'),
+      approval_above_eur: val('approval_above_eur'), monthly_budget_eur: val('monthly_budget_eur'),
+      allowed_domains: val('allowed_domains'), categories, shipping_addresses,
+      payment_methods: [...c.querySelectorAll('[data-pm]')].filter(i => i.checked).map(i => i.dataset.pm),
+      card_categories: val('card_categories'),
+      card_only_if_no_bsv: c.querySelector('[data-f2="card_only_if_no_bsv"]').checked } })
+    msg(r.message === 'No change' ? 'Nothing changed' : `Saved: ${r.message}`)
+  })
+  // Category and address rows: add / remove
+  c.querySelector('[data-a="add-cat"]').onclick = () => c.querySelector('[data-cats]').insertAdjacentHTML('beforeend', catRow())
+  c.querySelector('[data-a="add-addr"]').onclick = () => c.querySelector('[data-addrs]').insertAdjacentHTML('beforeend', addrRow())
+  c.querySelector('details.rules').onclick = e => { if (e.target.matches('[data-remove]')) { e.target.parentElement.remove(); msg('') } }
+  c.querySelector('[data-a="reset"]').onclick = e => run(e.target, async () => {
+    await api(`/agents/${a.id}/reset-budget`, 'POST'); await load(); $('c-' + a.id).querySelector('[data-msg]').textContent = 'Spending reset to €0.00'
+  })
+  c.querySelector('[data-a="status"]').onclick = e => run(e.target, async () => {
+    await api(`/agents/${a.id}/status`, 'POST', { active: !a.active }); await load()
+  })
+  c.querySelector('[data-a="pair"]').onclick = e => run(e.target, async () => {
+    const r = await api(`/agents/${a.id}/pairing`, 'POST')
+    const until = new Date(r.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    c.querySelector('[data-pair]').innerHTML = `<div class="key pairbox">
+      <b>Connect an AI assistant as ${esc(a.id)}</b><br>
+      1. In the assistant (Claude: Settings → Connectors → Add custom connector), add the URL<br><code>${esc(r.connectorUrl)}</code><br>
+      2. Click <b>Connect</b>. On the AgentGetPay page, enter this code:<br><code class="pair">${esc(r.code)}</code><br>
+      Single use, valid until ${until}.</div>`
+  })
+  c.querySelectorAll('[data-revoke]').forEach(b => b.onclick = e => run(e.target, async () => {
+    await api('/connections/' + b.dataset.revoke, 'DELETE'); await load()
+  }))
+  c.querySelector('[data-a="key"]').onclick = e => run(e.target, async () => {
+    const r = await api(`/agents/${a.id}/key`, 'POST')
+    c.querySelector('[data-key]').innerHTML = `<div class="key">New API key, shown <b>only once</b>. The old key no longer works. Give this one to the agent:<br><code>${esc(r.apiKey)}</code></div>`
+    msg('')
+  })
+}
+
+$('n-btn').onclick = async () => {
+  const b = $('n-btn'), m = $('n-msg')
+  const show = (t, ok) => { m.className = 'msg ' + (ok ? 'ok' : 'bad'); m.textContent = t }
+  const id = $('n-id').value.trim()
+  if (!id) return show('Enter a name for the agent', false)
+  b.disabled = true; $('n-key').innerHTML = ''
+  try {
+    const r = await api('/agents', 'POST', { id, rules: {
+      daily_budget_eur: $('n-daily').value, max_per_payment_eur: $('n-max').value,
+      approval_above_eur: $('n-appr').value, allowed_domains: $('n-domains').value } })
+    show(`Agent ${id} created`, true)
+    $('n-key').innerHTML = `<div class="key">API key for <b>${esc(id)}</b>, shown <b>only once</b>:<br><code>${esc(r.apiKey)}</code></div>`
+    $('n-id').value = ''
+    await load()
+  } catch (e) { if (e.message !== 'unauthorized') show(e.message, false) } finally { b.disabled = false }
+}
+document.querySelectorAll('#n-id, #n-daily, #n-max, #n-appr, #n-domains').forEach(i => i.oninput = () => { $('n-msg').textContent = '' })
+
+if (auth.token) load().catch(() => {})
+else showLogin()
+</script>
+</body>
+</html>

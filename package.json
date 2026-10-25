@@ -1,0 +1,46 @@
+{
+  "name": "agentpay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "wallet": "tsx src/create-wallet.ts",
+    "balance": "tsx src/balance.ts",
+    "send": "tsx src/send-test.ts",
+    "seller": "tsx src/seller/server.ts",
+    "agent": "tsx src/agent/demo.ts",
+    "test:local": "tsx src/test/local-flow.ts",
+    "proxy": "tsx src/proxy/server.ts",
+    "agent:proxy": "tsx src/agent/via-proxy.ts",
+    "ledger:verify": "tsx src/proxy/verify-ledger.ts",
+    "test:proxy": "tsx src/test/proxy-flow.ts",
+    "telegram:setup": "tsx src/telegram-setup.ts",
+    "anchor": "tsx src/proxy/anchor-now.ts",
+    "demo:tamper": "tsx src/demo/tamper.ts",
+    "export:datev": "tsx src/proxy/export-datev.ts",
+    "agent:pdf": "tsx src/agent/pdf-agent.ts",
+    "mcp": "tsx src/mcp/server.ts",
+    "mcp:http": "MCP_TRANSPORT=http tsx src/mcp/server.ts",
+    "mcp:config": "tsx src/mcp/print-config.ts",
+    "test:oauth": "tsx src/test/oauth-flow.ts",
+    "test:files": "tsx src/test/files-flow.ts",
+    "test:purchase": "tsx src/test/purchase-flow.ts",
+    "market": "tsx src/market/server.ts",
+    "test:market": "tsx src/test/market-flow.ts",
+    "test:approval": "tsx src/test/approval-flow.ts",
+    "test:card": "tsx src/test/card-flow.ts"
+  },
+  "dependencies": {
+    "@bsv/sdk": "^3.2.1",
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "dotenv": "^16.4.5",
+    "express": "^4.22.3",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.25",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
