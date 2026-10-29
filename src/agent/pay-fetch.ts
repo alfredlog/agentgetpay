@@ -1,9 +1,10 @@
 // The AGENT side: a fetch() that can pay a 402 response automatically.
 // In step 3 this code becomes the payment proxy, with the rules engine plugged into `beforePay`.
-import { Transaction, P2PKH, LockingScript } from '@bsv/sdk'
-import { NETWORK, PaymentRequired, PaymentPayload, PaymentResponse, OrderInfo, encode, decode } from '../shared/x402.js'
+import { Transaction, P2PKH, LockingScript } from '../shared/bsv.js'
+import { PaymentRequired, PaymentPayload, PaymentResponse, OrderInfo, encode, decode } from '../shared/x402.js'
 import { UtxoProvider } from '../shared/utxo.js'
 import { Mutex } from '../shared/mutex.js'
+import { x402Network } from '../shared/network.js'
 
 export type Unlocker = ReturnType<P2PKH['unlock']>
 
@@ -49,7 +50,7 @@ export async function payFetch(url: string, init: RequestInit, opts: PayFetchOpt
   if (!header) throw new Error('402 without PAYMENT-REQUIRED header')
   const offer = decode<PaymentRequired>(header)
   const req = offer.accepts.find(a =>
-    a.scheme === 'exact' && a.network === NETWORK && a.extra.payloadFormat.kind === 'p2pkh-rawtx')
+    a.scheme === 'exact' && a.network === x402Network() && a.extra.payloadFormat.kind === 'p2pkh-rawtx')
   if (!req) throw new Error('No compatible offer (BSV testnet, P2PKH)')
 
   const amount = Number(req.amount)
