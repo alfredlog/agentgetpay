@@ -1,7 +1,10 @@
 // The proxy's interfaces. The rest of the code ONLY knows these interfaces:
 // to move to the enterprise version, write a new class without touching the proxy.
-import type { Unlocker } from '../agent/pay-fetch.js'
-import type { OrderInfo } from '../shared/x402.js'
+import type { P2PKH } from '../shared/bsv.js'
+import type { OrderInfo } from '../shared/order.js'
+
+// Signs P2PKH inputs (audit-log anchors); the key stays in the KeyStore
+export type Unlocker = ReturnType<P2PKH['unlock']>
 
 export interface PaymentRequest {
   agentId: string

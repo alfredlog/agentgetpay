@@ -1,5 +1,5 @@
 // DEMO market: three fictional shops that get paid by AI agents,
-// in BSV via HTTP 402, with the seller kit. Each shop describes what it sells (category, items,
+// in BSV via HTTP 402 (BRC-121, @bsv/402-pay), with the seller kit. Each shop describes what it sells (category, items,
 // delivery): the buying company's proxy applies its purchase policy before paying.
 //
 //   GET  /            storefront (for humans: products and latest paid orders)
@@ -11,8 +11,10 @@ import 'dotenv/config'
 import express, { Request } from 'express'
 import { randomBytes } from 'node:crypto'
 import { appendFileSync, existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs'
-import { createSeller, type PaidInvoice } from '../shared/seller-kit.js'
-import type { OrderInfo } from '../shared/x402.js'
+import { createSeller, type PaidOrder } from '../shared/seller-kit.js'
+import { QUOTE_PATH, type OrderInfo } from '../shared/order.js'
+import { Hash, Utils } from '../shared/bsv.js'
+import { openServerWallet } from '../shared/wallet.js'
 import { explorerTx } from '../shared/network.js'
 
 const PORT = Number(process.env.MARKET_PORT ?? 5080)
@@ -20,7 +22,8 @@ const HOST = process.env.MARKET_HOST ?? '127.0.0.1'
 const EUR_PER_SAT = Number(process.env.EUR_PER_SAT ?? 0.01) // same fictional rate as the proxy (testnet)
 const PUBLIC_URL = (process.env.MARKET_PUBLIC_URL ?? `http://localhost:${PORT}`).replace(/\/$/, '')
 
-// Shop secret: created on first start (it derives the address of each invoice)
+// Shop secret: created on first start. It derives the root key of the shop's wallet-toolbox wallet
+// (which receives the payments and pays the refunds): keep it as secret as a private key.
 let SECRET = process.env.MARKET_SECRET ?? ''
 if (SECRET.length < 16) {
   SECRET = randomBytes(24).toString('base64url')
@@ -59,7 +62,7 @@ interface Sale {
   method?: 'bsv' | 'card'          // how it was paid
   authId?: string; last4?: string  // card payments: authorization id and last digits (never the full number)
   checkIn?: string                 // hotel: check-in date (for the cancellation terms)
-  paid?: PaidInvoice               // what is needed to refund
+  paid?: PaidOrder                 // what is needed to refund (txid, amount, buyer's identity key)
   status?: 'paid' | 'cancelled'
   refundTxid?: string; refundSats?: number
 }
@@ -71,21 +74,25 @@ const saveSales = () => {
   renameSync(`${SALES_FILE}.tmp`, SALES_FILE)
 }
 
+const wallet = await openServerWallet({
+  rootKeyHex: Utils.toHex(Hash.sha256(Utils.toArray(`agentgetpay-market-wallet:${SECRET}`, 'utf8'))),
+  filePath: process.env.MARKET_WALLET_FILE ?? 'data/market-wallet.sqlite',
+  databaseName: 'market_wallet'
+})
 const seller = createSeller({
-  secret: SECRET,
-  skipBroadcast: process.env.MARKET_SKIP_BROADCAST === '1',
+  wallet,
   log: m => console.log(`[market] ${m}`),
-  onPaid: (inv, txid, req) => {
-    const order = inv.order ? (JSON.parse(inv.order) as OrderInfo) : undefined
+  onPaid: (paid, req, res) => {
+    const order = paid.order
     const id = `${(order?.category ?? 'X').split('.')[0].slice(0, 2).toUpperCase()}-${randomBytes(3).toString('hex').toUpperCase()}`
     sales.push({
       id, ts: new Date().toISOString(), merchant: order?.merchant ?? 'Market', category: order?.category ?? '',
-      summary: order ? order.items.map(i => `${i.quantity}× ${i.name}`).join(', ') : inv.resource, sats: inv.amount, txid,
+      summary: order ? order.items.map(i => `${i.quantity}× ${i.name}`).join(', ') : paid.resource, sats: paid.sats, txid: paid.txid,
       checkIn: order?.category === 'travel.hotel' ? String(req.body?.checkIn ?? '') : undefined,
-      paid: seller.paidRecord(inv), status: 'paid'
+      paid, status: 'paid'
     })
     saveSales()
-    req.res!.locals.saleId = id
+    res.locals.saleId = id
   }
 })
 
@@ -139,6 +146,7 @@ function softwareQuote(b: any): { amount: number; order: OrderInfo } | { error: 
 const app = express()
 app.set('trust proxy', 'loopback')
 app.use(express.json({ limit: '100kb' }))
+app.post(QUOTE_PATH, seller.quote) // free quotes: price and order details before payment (BRC-121's 402 has no body)
 const base = (req: Request) => (process.env.MARKET_PUBLIC_URL ? PUBLIC_URL : `${req.protocol}://${req.get('host')}`)
 
 // ---------------------------------------------------------------------------
@@ -189,7 +197,7 @@ app.get('/api', (req, res) => {
   const b = base(req)
   res.json({
     name: 'Demo marketplace for AI agents (fictional shops)',
-    payment: 'HTTP 402 (x402 / BRC-166), paid in BSV testnet. Each paid offer describes the order (merchant, category, items, delivery) in extensions.order. Cards are accepted too: add "card": {"number", "cvc", "expMonth", "expYear"} to the order body.',
+    payment: `HTTP 402 with BRC-121 (x-bsv-sats, x-bsv-server), paid in BSV. Before paying, POST ${b}${QUOTE_PATH} with {"method", "path", "body"} returns the price and the order (merchant, category, items, delivery), free. Cards are accepted too: add "card": {"number", "cvc", "expMonth", "expYear"} to the order body.`,
     merchantCodes: { hotels: 'MCC 7011', office: 'MCC 5943', software: 'MCC 5734' },
     shops: [
       {
@@ -227,24 +235,25 @@ app.get('/api/hotels', (req, res) => {
 app.get('/api/office/products', (_req, res) => res.json(Object.entries(PRODUCTS).map(([sku, p]) => ({ sku, name: p.name, priceSats: p.sats, priceEur: +(p.sats * EUR_PER_SAT).toFixed(2) }))))
 app.get('/api/software/plans', (_req, res) => res.json(Object.entries(PLANS).map(([plan, p]) => ({ plan, name: p.name, pricePerSeatPerMonthSats: p.satsPerSeat, pricePerSeatPerMonthEur: +(p.satsPerSeat * EUR_PER_SAT).toFixed(2) }))))
 
-app.post('/api/hotels/book', cardCheckout(hotelQuote, '7011'), unlessCard(seller.requirePayment(req => hotelQuote(req.body), 'Hotel booking')), (req, res) => {
+app.post('/api/hotels/book', cardCheckout(hotelQuote, '7011'), unlessCard(seller.requirePayment('POST /api/hotels/book', hotelQuote, 'Hotel booking')), (req, res) => {
   const q = hotelQuote(req.body) as { order: OrderInfo }
   res.json({
     confirmation: res.locals.saleId ?? 'already confirmed', hotel: q.order.merchant, guest: req.body.guest, checkIn: req.body.checkIn, nights: req.body.nights ?? 1, txid: res.locals.payment?.txid,
     cancellation: `Free cancellation until the day before check-in: POST ${base(req)}/api/cancel with {"order": "${res.locals.saleId ?? '…'}"}`
   })
 })
-app.post('/api/office/orders', cardCheckout(officeQuote, '5943'), unlessCard(seller.requirePayment(req => officeQuote(req.body), 'Office supplies order')), (req, res) => {
+app.post('/api/office/orders', cardCheckout(officeQuote, '5943'), unlessCard(seller.requirePayment('POST /api/office/orders', officeQuote, 'Office supplies order')), (req, res) => {
   res.json({
     order: res.locals.saleId ?? 'already confirmed', delivery: '2–3 business days', txid: res.locals.payment?.txid,
     cancellation: `Can be cancelled within 1 hour: POST ${base(req)}/api/cancel with {"order": "${res.locals.saleId ?? '…'}"}`
   })
 })
-app.post('/api/software/subscribe', cardCheckout(softwareQuote, '5734'), unlessCard(seller.requirePayment(req => softwareQuote(req.body), 'Software subscription (1 month)')), (req, res) => {
+app.post('/api/software/subscribe', cardCheckout(softwareQuote, '5734'), unlessCard(seller.requirePayment('POST /api/software/subscribe', softwareQuote, 'Software subscription (1 month)')), (req, res) => {
   res.json({ subscription: res.locals.saleId ?? 'already confirmed', plan: req.body.plan, seats: req.body.seats ?? 1, period: '1 month', txid: res.locals.payment?.txid })
 })
 
-// Cancellation with a refund in BSV (PAYMENT-REFUND header: the buyer's proxy verifies and records it)
+// Cancellation with a refund in BSV: a BRC-29 payment to the buyer's identity key, in the "refund"
+// field of the answer (the buyer's proxy verifies it, internalizes it and records it)
 //   hotel: free until the day before check-in · office supplies: within 1 hour · subscription: no refund
 app.post('/api/cancel', async (req, res) => {
   const sale = sales.find(x => x.id === String(req.body?.order ?? '').trim().toUpperCase())
@@ -254,12 +263,12 @@ app.post('/api/cancel', async (req, res) => {
   if (sale.category === 'office.supplies' && Date.now() - Date.parse(sale.ts) > 3600_000) return res.status(409).json({ error: 'Too late: the order has been shipped (cancellation within 1 hour only)' })
   if (sale.category.startsWith('software')) return res.status(409).json({ error: 'Subscriptions are not refunded; they simply end after the paid month' })
   if (sale.method === 'card') return res.status(409).json({ error: 'Card payments are refunded through the card network (not part of this demo)' })
-  if (!sale.paid) return res.status(409).json({ error: 'This order cannot be refunded automatically' })
+  if (!sale.paid?.payer) return res.status(409).json({ error: 'This order cannot be refunded automatically' })
   try {
-    const notice = await seller.refund(sale.paid)
-    Object.assign(sale, { status: 'cancelled', refundTxid: notice.refundTxid, refundSats: notice.sats })
+    const refund = await seller.refund(sale.paid)
+    Object.assign(sale, { status: 'cancelled', refundTxid: refund.txid, refundSats: refund.satoshis })
     saveSales()
-    res.set('PAYMENT-REFUND', seller.refundHeader(notice)).json({ cancelled: sale.id, refundSats: notice.sats, refundEur: +(notice.sats * EUR_PER_SAT).toFixed(2), refundTxid: notice.refundTxid })
+    res.json({ cancelled: sale.id, refundSats: refund.satoshis, refundEur: +(refund.satoshis * EUR_PER_SAT).toFixed(2), refundTxid: refund.txid, refund })
   } catch (e) {
     res.status(500).json({ error: `Refund failed: ${(e as Error).message}` })
   }

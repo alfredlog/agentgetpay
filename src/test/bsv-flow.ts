@@ -6,7 +6,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { PrivateKey, Transaction, P2PKH, sdkModule } from '../shared/bsv.js'
 import { ArcadeBroadcaster, ArcadeChainTracker, arcadeUrl, ARCADE_MAINNET, ARCADE_TESTNET } from '../shared/arcade.js'
-import { bsvNetwork, addressNetwork, x402Network, explorerTx } from '../shared/network.js'
+import { bsvNetwork, addressNetwork, explorerTx } from '../shared/network.js'
 
 let failures = 0
 const check = (ok: boolean, label: string) => { console.log(`${ok ? '✓' : '✗'} ${label}`); if (!ok) failures++ }
@@ -24,6 +24,12 @@ const walk = (d: string): string[] => readdirSync(d).flatMap(f => { const p = jo
 const direct = walk('src').filter(f => !f.endsWith(join('shared', 'bsv.ts')))
   .filter(f => /from\s+['"]@bsv\/sdk|import\(\s*['"]@bsv\/sdk|require\(\s*['"]@bsv\/sdk/.test(readFileSync(f, 'utf8')))
 check(direct.length === 0, `no file imports @bsv/sdk directly${direct.length ? ': ' + direct.map(f => relative('.', f)).join(', ') : ''}`)
+// @bsv/402-pay also has an ESM build (with the ESM SDK): only src/shared/brc121.ts loads it
+const pay402 = walk('src').filter(f => !f.endsWith(join('shared', 'brc121.ts')))
+  .filter(f => /from\s+['"]@bsv\/402-pay|import\(\s*['"]@bsv\/402-pay|require\(\s*['"]@bsv\/402-pay/.test(readFileSync(f, 'utf8')))
+check(pay402.length === 0, `no file imports @bsv/402-pay directly${pay402.length ? ': ' + pay402.map(f => relative('.', f)).join(', ') : ''}`)
+const { createPaymentMiddleware } = await import('../shared/brc121.js')
+check(typeof createPaymentMiddleware === 'function' && require.cache[require.resolve('@bsv/402-pay/server')] !== undefined, '@bsv/402-pay is loaded as CommonJS (same SDK build)')
 
 // ---- 2. Fake Arcade ----
 const posted: { rawTx: string }[] = []
@@ -97,10 +103,10 @@ server.close()
 const saved = { n: process.env.BSV_NETWORK, a: process.env.ARCADE_URL }
 delete process.env.ARCADE_URL
 delete process.env.BSV_NETWORK
-check(bsvNetwork() === 'test' && arcadeUrl() === ARCADE_TESTNET && x402Network() === 'bsv:testnet', 'default: testnet, testnet Arcade')
+check(bsvNetwork() === 'test' && arcadeUrl() === ARCADE_TESTNET, 'default: testnet, testnet Arcade')
 check(explorerTx('ab') === 'https://test.whatsonchain.com/tx/ab', 'testnet explorer link')
 process.env.BSV_NETWORK = 'main'
-check(arcadeUrl() === ARCADE_MAINNET && addressNetwork() === 'mainnet' && x402Network() === 'bsv:mainnet', 'BSV_NETWORK=main: mainnet Arcade, mainnet addresses')
+check(arcadeUrl() === ARCADE_MAINNET && addressNetwork() === 'mainnet', 'BSV_NETWORK=main: mainnet Arcade, mainnet addresses')
 check(key.toAddress(addressNetwork()).startsWith('1'), 'mainnet address starts with 1')
 check(explorerTx('ab') === 'https://whatsonchain.com/tx/ab', 'mainnet explorer link')
 process.env.ARCADE_URL = 'https://arcade.example/'
