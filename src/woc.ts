@@ -1,7 +1,5 @@
-// Small client for the WhatsOnChain API (network from BSV_NETWORK).
-// Only for what Arcade does not serve: the coins (UTXOs) of an address and raw transactions by txid.
-// Broadcasting and block headers go through Arcade (src/shared/arcade.ts).
-import { wocApi } from './shared/network.js'
+// Small client for the WhatsOnChain API (testnet).
+const WOC = 'https://api.whatsonchain.com/v1/bsv/test'
 
 export interface Utxo {
   tx_hash: string
@@ -31,7 +29,7 @@ interface WocUnspent extends Utxo { isSpentInMempoolTx?: boolean }
 // coins that are already spent, which causes rejected double spends.)
 export async function getUtxos(address: string): Promise<Utxo[]> {
   const lists = await Promise.all(['confirmed', 'unconfirmed'].map(async kind => {
-    const res = await wocFetch(`${wocApi()}/address/${address}/${kind}/unspent`)
+    const res = await wocFetch(`${WOC}/address/${address}/${kind}/unspent`)
     // A brand-new address that never received anything is unknown to WhatsOnChain: 404 = no coins.
     if (res.status === 404) return []
     if (!res.ok) throw new Error(`WhatsOnChain responded ${res.status}`)
@@ -47,7 +45,7 @@ export async function getUtxos(address: string): Promise<Utxo[]> {
 // WhatsOnChain has not indexed it yet. So we retry several times.
 export async function getTxHex(txid: string, tries = 5): Promise<string> {
   for (let i = 1; i <= tries; i++) {
-    const res = await wocFetch(`${wocApi()}/tx/${txid}/hex`)
+    const res = await wocFetch(`${WOC}/tx/${txid}/hex`)
     if (res.ok) return res.text()
     if (res.status !== 404 || i === tries) {
       throw new Error(`Transaction ${txid} not found (${res.status}) after ${i} attempt(s)`)
