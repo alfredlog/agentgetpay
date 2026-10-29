@@ -13,6 +13,7 @@ import { randomBytes } from 'node:crypto'
 import { appendFileSync, existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs'
 import { createSeller, type PaidInvoice } from '../shared/seller-kit.js'
 import type { OrderInfo } from '../shared/x402.js'
+import { explorerTx } from '../shared/network.js'
 
 const PORT = Number(process.env.MARKET_PORT ?? 5080)
 const HOST = process.env.MARKET_HOST ?? '127.0.0.1'
@@ -301,7 +302,7 @@ ${card(MERCHANTS.software, 'software.subscription', Object.values(PLANS).map(p =
 </div>
 <h2>Latest orders paid by agents</h2>
 <section class="card wrap"><table><thead><tr><th>Time</th><th>Order</th><th>Shop</th><th>What</th><th class="num">Amount</th><th>Payment</th></tr></thead><tbody>
-${recent.map(s => `<tr><td class="muted">${new Date(s.ts).toLocaleString('en-GB', { timeZone: 'Europe/Berlin', dateStyle: 'short', timeStyle: 'short' })}</td><td>${esc(s.id)}</td><td>${esc(s.merchant)}</td><td class="muted">${esc(s.summary)}</td><td class="num">${eur(s.sats)}</td><td>${s.method === 'card' ? `<span class="muted">Card •••• ${esc(s.last4)}</span>` : `<a href="https://test.whatsonchain.com/tx/${esc(s.txid)}" rel="noopener" target="_blank">${esc(s.txid.slice(0, 10))}…</a>`}${s.status === 'cancelled' && s.refundTxid ? `<br><span class="muted">Cancelled · refund </span><a href="https://test.whatsonchain.com/tx/${esc(s.refundTxid)}" rel="noopener" target="_blank">${esc(s.refundTxid.slice(0, 10))}…</a>` : ''}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">No order yet.</td></tr>'}
+${recent.map(s => `<tr><td class="muted">${new Date(s.ts).toLocaleString('en-GB', { timeZone: 'Europe/Berlin', dateStyle: 'short', timeStyle: 'short' })}</td><td>${esc(s.id)}</td><td>${esc(s.merchant)}</td><td class="muted">${esc(s.summary)}</td><td class="num">${eur(s.sats)}</td><td>${s.method === 'card' ? `<span class="muted">Card •••• ${esc(s.last4)}</span>` : `<a href="${explorerTx(esc(s.txid))}" rel="noopener" target="_blank">${esc(s.txid.slice(0, 10))}…</a>`}${s.status === 'cancelled' && s.refundTxid ? `<br><span class="muted">Cancelled · refund </span><a href="${explorerTx(esc(s.refundTxid))}" rel="noopener" target="_blank">${esc(s.refundTxid.slice(0, 10))}…</a>` : ''}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">No order yet.</td></tr>'}
 </tbody></table></section>
 </main></body></html>`)
 })

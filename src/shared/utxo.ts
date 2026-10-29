@@ -1,6 +1,6 @@
 // Interface to find the coins (UTXO) of an address.
 // Real implementation: WhatsOnChain. In tests: a simulated version.
-import { Transaction } from '@bsv/sdk'
+import { Transaction } from './bsv.js'
 import { getUtxos, getTxHex } from '../woc.js'
 
 export interface SpendableUtxo {

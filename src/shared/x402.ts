@@ -1,5 +1,5 @@
 // Types and helpers of the x402 / BRC-166 protocol (P2PKH profile, raw transaction).
-export const NETWORK = 'bsv:testnet'
+// The network name ('bsv:mainnet' | 'bsv:testnet') comes from BSV_NETWORK: x402Network() in network.ts
 
 export interface PaymentRequirements {
   scheme: 'exact'
