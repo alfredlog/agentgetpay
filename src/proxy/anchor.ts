@@ -5,12 +5,13 @@
 import { appendFileSync, existsSync, readFileSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { createHash } from 'node:crypto'
-import { Transaction, P2PKH, LockingScript, Utils, Broadcaster, WhatsOnChainBroadcaster } from '@bsv/sdk'
+import { Transaction, P2PKH, LockingScript, Utils, Broadcaster } from '../shared/bsv.js'
 import { UtxoProvider } from '../shared/utxo.js'
 import { Mutex } from '../shared/mutex.js'
 import { getTxHex } from '../woc.js'
 import type { LedgerEntry } from './types.js'
 import type { Unlocker } from '../agent/pay-fetch.js'
+import { ArcadeBroadcaster } from '../shared/arcade.js'
 
 const PROTOCOL = 'agentpay-v1'
 
@@ -55,7 +56,7 @@ export class BsvAnchorRail {
     private unlocker: () => Unlocker,
     private utxos: UtxoProvider & { remember(tx: Transaction): void },
     private lock: Mutex,
-    private broadcaster: Broadcaster = new WhatsOnChainBroadcaster('test')
+    private broadcaster: Broadcaster = new ArcadeBroadcaster()
   ) {}
 
   publish(seq: number, hash: string): Promise<string> {
