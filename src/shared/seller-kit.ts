@@ -10,10 +10,12 @@
 // (for example to refund) without storing anything but this secret.
 import type { Request, Response, NextFunction } from 'express'
 import { randomBytes } from 'node:crypto'
-import { PrivateKey, Hash, Utils, P2PKH, Transaction, WhatsOnChainBroadcaster, LockingScript } from '@bsv/sdk'
+import { PrivateKey, Hash, Utils, P2PKH, Transaction, LockingScript } from './bsv.js'
 import {
-  NETWORK, PaymentRequired, PaymentRequirements, PaymentPayload, PaymentResponse, OrderInfo, RefundNotice, encode, decode
+  PaymentRequired, PaymentRequirements, PaymentPayload, PaymentResponse, OrderInfo, RefundNotice, encode, decode
 } from './x402.js'
+import { ArcadeBroadcaster } from './arcade.js'
+import { addressNetwork, x402Network } from './network.js'
 
 export interface Invoice {
   id: string
@@ -54,7 +56,7 @@ export function createSeller(o: SellerOptions) {
 
   function createInvoice(resource: string, amount: number, order?: OrderInfo): Invoice {
     const id = randomBytes(12).toString('hex')
-    const payTo = invoiceKey(id).toAddress('testnet')
+    const payTo = invoiceKey(id).toAddress(addressNetwork())
     const lockingScriptHex = new P2PKH().lock(payTo).toHex().toLowerCase()
     const inv: Invoice = {
       id, resource, amount, payTo, lockingScriptHex,
@@ -68,7 +70,7 @@ export function createSeller(o: SellerOptions) {
 
   function requirements(inv: Invoice): PaymentRequirements {
     return {
-      scheme: 'exact', network: NETWORK, amount: String(inv.amount), asset: 'BSV',
+      scheme: 'exact', network: x402Network(), amount: String(inv.amount), asset: 'BSV',
       payTo: inv.payTo, maxTimeoutSeconds: 900,
       extra: {
         chain: 'bsv', unit: 'satoshi', invoiceId: inv.id, lockingScriptHex: inv.lockingScriptHex,
@@ -78,7 +80,7 @@ export function createSeller(o: SellerOptions) {
   }
 
   function fail(res: Response, status: number, reason: string, extra: object = {}) {
-    const pr: PaymentResponse = { success: false, network: NETWORK, errorReason: reason }
+    const pr: PaymentResponse = { success: false, network: x402Network(), errorReason: reason }
     res.status(status).set('PAYMENT-RESPONSE', encode(pr)).json({ error: reason, ...extra })
   }
 
@@ -135,7 +137,7 @@ export function createSeller(o: SellerOptions) {
         // 4. Broadcast the transaction to the network (the seller broadcasts)
         const txid = tx.id('hex')
         if (!o.skipBroadcast) {
-          const r = await tx.broadcast(new WhatsOnChainBroadcaster('test'))
+          const r = await tx.broadcast(new ArcadeBroadcaster())
           const known = r.status !== 'success' && /already|known|txn-already/i.test(JSON.stringify(r))
           if (r.status !== 'success' && !known) return fail(res, 402, 'broadcast_rejected', { retryable: false, detail: r })
         }
@@ -156,7 +158,7 @@ export function createSeller(o: SellerOptions) {
       }
 
       function serve(txid: string, fresh: boolean) {
-        const pr: PaymentResponse = { success: true, transaction: txid, network: NETWORK, extensions: { status: 'mempool' } }
+        const pr: PaymentResponse = { success: true, transaction: txid, network: x402Network(), extensions: { status: 'mempool' } }
         res.set('PAYMENT-RESPONSE', encode(pr))
         res.locals.payment = { invoice: inv!, txid, replay: !fresh }
         if (fresh) o.onPaid?.(inv!, txid, req)
@@ -174,14 +176,14 @@ export function createSeller(o: SellerOptions) {
     const value = paidTx.outputs[index].satoshis ?? 0
     const tx = new Transaction()
     tx.addInput({ sourceTransaction: paidTx, sourceOutputIndex: index, unlockingScriptTemplate: new P2PKH().unlock(invoiceKey(inv.id)) })
-    if (keepSats > 0) tx.addOutput({ lockingScript: new P2PKH().lock(invoiceKey(inv.id).toAddress('testnet')), satoshis: Math.min(keepSats, value) })
+    if (keepSats > 0) tx.addOutput({ lockingScript: new P2PKH().lock(invoiceKey(inv.id).toAddress(addressNetwork())), satoshis: Math.min(keepSats, value) })
     tx.addOutput({ lockingScript: LockingScript.fromHex(inv.refundScriptHex), change: true })
     await tx.fee()
     const back = tx.outputs.at(-1)?.satoshis ?? 0
     if (back < 1) throw new Error('Amount too small to refund after network fees')
     await tx.sign()
     if (!o.skipBroadcast) {
-      const r = await tx.broadcast(new WhatsOnChainBroadcaster('test'))
+      const r = await tx.broadcast(new ArcadeBroadcaster())
       if (r.status !== 'success' && !/already|known|txn-already/i.test(JSON.stringify(r))) throw new Error(`Refund rejected by the network: ${JSON.stringify(r).slice(0, 200)}`)
     }
     const notice = { paymentTxid: inv.settledTxid, refundTxid: tx.id('hex'), rawtx: tx.toHex(), sats: back }

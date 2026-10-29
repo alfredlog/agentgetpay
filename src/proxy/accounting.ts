@@ -5,6 +5,7 @@
 import { readFileSync } from 'node:fs'
 import type { LedgerEntry } from './types.js'
 import type { Anchor } from './anchor.js'
+import { explorerTx } from '../shared/network.js'
 
 export interface AccountingConfig {
   companyName: string
@@ -128,7 +129,7 @@ export function monthlyStatementHtml(entries: LedgerEntry[], anchors: Anchor[], 
   ${paid.map(e => `<tr><td>AGP-${e.seq}</td><td>${esc(date(e.ts))}</td><td>${esc(e.agentId)}</td>
     <td>${esc(e.decision === 'refund' ? `Refund · ${label(e)}` : label(e))}</td><td>${esc(e.purpose)}</td>
     <td>${esc(e.decision === 'refund' ? '—' : e.approvedBy ?? 'Within policy')}</td><td class="num">${e.decision === 'refund' ? '−' : ''}€${e.amountEur.toFixed(2)}</td>
-    <td>${e.txid ? `<a href="https://test.whatsonchain.com/tx/${e.txid}">${e.txid.slice(0, 12)}…</a>` : `Card · ${esc(e.authId)}`}</td></tr>`).join('')}
+    <td>${e.txid ? `<a href="${explorerTx(e.txid)}">${e.txid.slice(0, 12)}…</a>` : `Card · ${esc(e.authId)}`}</td></tr>`).join('')}
   <tr class="total"><td colspan="6">Net total</td><td class="num">€${total.toFixed(2)}</td><td></td></tr>
   </tbody>
 </table>
@@ -143,7 +144,7 @@ export function monthlyStatementHtml(entries: LedgerEntry[], anchors: Anchor[], 
   ${seal
     ? `All payments above are recorded in a hash-chained audit log, sealed on the BSV blockchain up to entry #${seal.seq}
        (fingerprint <code>${esc(seal.hash.slice(0, 16))}…</code>, transaction
-       <a href="https://test.whatsonchain.com/tx/${seal.txid}">${seal.txid.slice(0, 16)}…</a>).
+       <a href="${explorerTx(seal.txid)}">${seal.txid.slice(0, 16)}…</a>).
        Anyone can verify that these records were not changed after that point.`
     : `The latest entries are not anchored on the blockchain yet. Anchor the log before closing the month.`}
 </div>

@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path'
 import { spawn, ChildProcess } from 'node:child_process'
 import { createRequire } from 'node:module'
 import http from 'node:http'
-import { PrivateKey } from '@bsv/sdk'
+import { PrivateKey } from '../shared/bsv.js'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 
