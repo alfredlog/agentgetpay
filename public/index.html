@@ -172,7 +172,6 @@ document.getElementById('btn-datev').onclick = () => download('/v1/export/datev'
 document.getElementById('btn-statement').onclick = () => download('/v1/export/statement', 'statement.html', true)
 
 let role = 'public'
-let explorer = 'https://test.whatsonchain.com' // replaced by the proxy's value (BSV_NETWORK) in openSession
 // Private dashboard: ask for an access code (created by the administrator) or the admin password
 const $ = id => document.getElementById(id)
 const setToken = t => { try { t ? sessionStorage.setItem('agp-token', t) : sessionStorage.removeItem('agp-token') } catch {} }
@@ -184,7 +183,6 @@ function showLocked(msg = '') {
 async function openSession() {
   const s = await fetch('/v1/session', { headers: { 'X-Admin-Token': adminToken() } }).then(r => r.json()).catch(() => ({ role: 'public' }))
   if (s.role === 'none') return showLocked()
-  if (s.explorer) explorer = s.explorer
   $('gate').classList.add('hidden'); $('content').classList.remove('hidden'); $('chain').classList.remove('hidden')
   const viewer = s.role === 'viewer'
   role = s.role
@@ -236,7 +234,7 @@ async function refresh() {
       <td>Entry #${a.seq}</td>
       <td class="muted">${when(a.ts)}</td>
       <td class="muted"><code>${a.hash.slice(0, 16)}…</code></td>
-      <td><a href="${explorer}/tx/${a.txid}" target="_blank">${a.txid.slice(0, 10)}…</a></td></tr>`).join('')
+      <td><a href="https://test.whatsonchain.com/tx/${a.txid}" target="_blank">${a.txid.slice(0, 10)}…</a></td></tr>`).join('')
 
     // Approval is possible here too (administrator, or local proxy): useful if Telegram does not answer
     const canDecide = role === 'admin' || role === 'local'
@@ -269,7 +267,7 @@ async function refresh() {
       const isAdmin = e.decision === 'admin'
       const details = (isAdmin ? `${esc(e.reason)} · by ${esc(e.approvedBy)}`
         : e.approvedBy ? `Approved by ${esc(e.approvedBy)}` : esc(e.reason ?? '')) + (e.requestId ? ` <span class="muted">· ${esc(e.requestId)}</span>` : '')
-      const proof = e.txid ? `<a href="${explorer}/tx/${e.txid}" target="_blank">${e.txid.slice(0, 10)}…</a>`
+      const proof = e.txid ? `<a href="https://test.whatsonchain.com/tx/${e.txid}" target="_blank">${e.txid.slice(0, 10)}…</a>`
         : e.authId ? `<span class="muted" title="${esc(e.authId)}">💳 Card</span>` : '<span class="muted">—</span>'
       return `<tr class="${e.seq > seen && seen ? 'new' : ''}">
         <td class="muted">${when(e.ts)}</td>
