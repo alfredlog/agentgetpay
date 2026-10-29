@@ -21,7 +21,8 @@ import { DatevExporter, loadAccountingConfig, monthlyStatementHtml } from './acc
 import { AgentRegistry, validateRules, validAgentId } from './registry.js'
 import { ViewerStore, validViewerName } from './viewers.js'
 import { OAuthServer } from './oauth.js'
-import type { Broadcaster } from '@bsv/sdk'
+import type { Broadcaster } from '../shared/bsv.js'
+import { explorerTx, wocExplorer } from '../shared/network.js'
 
 
 // Testnet: coins have no value, so we use a fictional rate to get readable amounts.
@@ -143,7 +144,7 @@ export function createProxy(
     const txid = await rail.publish(last.seq, last.hash)
     const a = { seq: last.seq, hash: last.hash, txid, ts: new Date().toISOString() }
     anchorLog.add(a)
-    console.log(`⚓ Audit log anchored on BSV up to entry #${a.seq} — https://test.whatsonchain.com/tx/${txid}`)
+    console.log(`⚓ Audit log anchored on BSV up to entry #${a.seq} — ${explorerTx(txid)}`)
     return a
   })
   let anchorInProgress = false // avoids starting a 2nd anchor while one is already running
@@ -437,10 +438,11 @@ export function createProxy(
   // Who is signed in? (the dashboard shows the name and hides admin-only buttons)
   app.get('/v1/session', (req, res) => {
     const token = String(req.get('X-Admin-Token') ?? '')
-    if (isAdmin(req)) return res.json({ role: 'admin' })
+    const explorer = wocExplorer() // the dashboard builds its transaction links from it (BSV_NETWORK)
+    if (isAdmin(req)) return res.json({ role: 'admin', explorer })
     const v = token ? viewers.authenticate(token) : undefined
-    if (v) return res.json({ role: 'viewer', name: v.name })
-    res.json({ role: !EXPOSED ? 'local' : PUBLIC_READ ? 'public' : 'none' })
+    if (v) return res.json({ role: 'viewer', name: v.name, explorer })
+    res.json({ role: !EXPOSED ? 'local' : PUBLIC_READ ? 'public' : 'none', explorer })
   })
 
   // For the dashboard
