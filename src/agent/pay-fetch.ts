@@ -71,6 +71,13 @@ export async function fetchQuote(url: string, method: string, body?: string): Pr
   return { sats: q.sats, description: typeof q.description === 'string' ? q.description.slice(0, 200) : undefined, order: validOrder(q.order) }
 }
 
+// The payment was sent, but the merchant did not deliver (fresh 402, or the paid request failed)
+export class PaidNotDelivered extends Error {
+  constructor(public paid: { amount: number; txid: string }, detail: string) {
+    super(`Paid ${paid.amount} sats (tx ${paid.txid}), but the merchant did not deliver: ${detail}`)
+  }
+}
+
 const bodyText = (init: RequestInit) => typeof init.body === 'string' ? init.body : undefined
 
 export async function payFetch(url: string, init: RequestInit, opts: PayFetchOptions): Promise<PayFetchResult> {
@@ -99,13 +106,17 @@ export async function payFetch(url: string, init: RequestInit, opts: PayFetchOpt
     const txid = Beef.fromBinary(Utils.toArray(payment[BRC121.BEEF], 'base64')).atomicTxid // computed here, not taken from the merchant
     if (!txid) throw new Error('The wallet returned a payment without a transaction id')
 
+    // From here on the money is gone: createAction has already sent the payment. Any failure
+    // below is reported WITH the txid, so the caller can book what the wallet really spent.
+    const paid = { amount, txid }
     // 4. Same request again, with the payment
     const headers = new Headers(init.headers)
     for (const [k, v] of Object.entries(payment)) headers.set(k, v)
-    const second = await fetch(url, { ...init, headers })
+    let second: Response
+    try { second = await fetch(url, { ...init, headers }) } catch (e) { throw new PaidNotDelivered(paid, (e as Error).message) }
     // A fresh 402 means the merchant did not accept the payment (invalid, expired or replayed)
-    if (second.status === 402) throw new Error('Payment rejected by the merchant (fresh 402)')
-    return { response: second, paid: { amount, txid } }
+    if (second.status === 402) throw new PaidNotDelivered(paid, 'the merchant answered a fresh 402')
+    return { response: second, paid }
   }
   return opts.spendLock ? opts.spendLock.run(spend) : spend()
 }

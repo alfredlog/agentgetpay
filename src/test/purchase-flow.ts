@@ -5,8 +5,10 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawn, ChildProcess } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { PrivateKey } from '../shared/bsv.js'
+import http from 'node:http'
+import { PrivateKey, Beef, Utils } from '../shared/bsv.js'
 import { prepareMockChain } from './helpers/mockchain.js'
+import { childEnv } from './helpers/env.js'
 
 const PROXY_PORT = 5350, SELLER_PORT = 5390
 const PROXY = `http://127.0.0.1:${PROXY_PORT}`, SHOP = `http://localhost:${SELLER_PORT}`
@@ -22,7 +24,7 @@ await prepareMockChain(process.env.MOCK_CHAIN_DB)
 const tsx = createRequire(import.meta.url).resolve('tsx/cli')
 const procs: ChildProcess[] = []
 const start = (file: string, env: Record<string, string>) => {
-  const p = spawn(process.execPath, [tsx, join(root, file)], { cwd: dir, env: { ...process.env, ...env }, stdio: ['ignore', 'ignore', 'pipe'] })
+  const p = spawn(process.execPath, [tsx, join(root, file)], { cwd: dir, env: childEnv({ MOCK_CHAIN_DB: process.env.MOCK_CHAIN_DB!, ...env }), stdio: ['ignore', 'ignore', 'pipe'] })
   p.stderr!.on('data', d => { if (/error/i.test(String(d))) process.stderr.write(d) })
   procs.push(p)
   return p
@@ -43,6 +45,16 @@ const buy = (path: string, body: unknown, purpose = 'Test purchase') => fetch(`$
   method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
   body: JSON.stringify({ url: `${SHOP}${path}`, method: 'POST', body, purpose })
 }).then(async r => ({ status: r.status, json: await r.json().catch(() => ({})) as any }))
+
+// A merchant that takes the payment but never delivers: every answer is a fresh 402 (BRC-121 challenge)
+const BROKEN_PORT = 5396
+const brokenKey = PrivateKey.fromRandom().toPublicKey().toString()
+const brokenSeen: string[] = [] // txids of the payments it received (from x-bsv-beef)
+const broken = http.createServer((req, res) => {
+  const beef = req.headers['x-bsv-beef']
+  if (typeof beef === 'string') brokenSeen.push(Beef.fromBinary(Utils.toArray(beef, 'base64')).atomicTxid!)
+  res.writeHead(402, { 'x-bsv-sats': '500', 'x-bsv-server': brokenKey }).end()
+}).listen(BROKEN_PORT, '127.0.0.1')
 
 const company = { street: 'Leopoldstraße 1', postalCode: '80802', city: 'München', country: 'DE' }
 const rules = {
@@ -102,6 +114,20 @@ try {
   const s = stats.agents.find((a: any) => a.agentId === 'einkauf-test')
   check(s?.monthlyBudgetEur === 500 && Math.abs(s.spentMonthEur - 250) < 0.001, 'Dashboard shows the monthly budget and what was spent')
 
+  // Paid, but the merchant answers a fresh 402: the ledger keeps the payment (txid) and the budget stays spent
+  const nd = await fetch(`${PROXY}/v1/fetch`, {
+    method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url: `http://localhost:${BROKEN_PORT}/api/broken`, method: 'GET', purpose: 'Broken merchant' })
+  }).then(async r => ({ status: r.status, json: await r.json().catch(() => ({})) as any }))
+  check(nd.status === 502 && /did not deliver/.test(nd.json.reason ?? ''), `Fresh 402 after payment: the agent is told it paid but got nothing (${nd.status})`)
+  const ndLedger = await fetch(`${PROXY}/v1/ledger`).then(x => x.json()) as any[]
+  const ndEntry = ndLedger.find(e => e.url?.includes(`:${BROKEN_PORT}/`))
+  check(ndEntry?.decision === 'allow' && ndEntry.amountSats === 500 && ndEntry.reason === 'paid, merchant did not deliver' && brokenSeen.length === 1 && ndEntry.txid === brokenSeen[0],
+    'The payment is booked as allow with the txid the merchant received')
+  check(!ndLedger.some(e => e.url?.includes(`:${BROKEN_PORT}/`) && e.decision === 'error'), 'No error entry without txid')
+  const me2 = await fetch(`${PROXY}/v1/me`, { headers: { Authorization: `Bearer ${key}` } }).then(x => x.json()) as any
+  check(Math.abs(me2.spentMonthEur - 255) < 0.001, `The budget stays spent (€${me2.spentMonthEur})`)
+
   // Rules saved on disk
   const saved = JSON.parse(readFileSync(join(dir, 'config/policies.json'), 'utf8'))['einkauf-test']
   check(saved?.categories?.travel?.max_unit_price_eur === 150 && saved.shipping_addresses?.[0]?.city === 'München', 'Rules saved in config/policies.json')
@@ -109,6 +135,7 @@ try {
   console.error(e); failures++
 } finally {
   for (const p of procs) p.kill()
+  broken.close()
   rmSync(dir, { recursive: true, force: true })
 }
 console.log(failures ? `\n${failures} check(s) failed` : '\nAll purchase-rule checks passed')

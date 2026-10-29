@@ -8,6 +8,7 @@ import { createRequire } from 'node:module'
 import http from 'node:http'
 import { PrivateKey } from '../shared/bsv.js'
 import { prepareMockChain } from './helpers/mockchain.js'
+import { childEnv } from './helpers/env.js'
 
 const PROXY_PORT = 5550, MARKET_PORT = 5580, HOOK_PORT = 5590
 const PROXY = `http://127.0.0.1:${PROXY_PORT}`, MARKET = `http://localhost:${MARKET_PORT}`
@@ -27,7 +28,7 @@ const hookServer = http.createServer((req, res) => { let b = ''; req.on('data', 
 const tsx = createRequire(import.meta.url).resolve('tsx/cli')
 const procs: ChildProcess[] = []
 const start = (file: string, env: Record<string, string>) => {
-  const p = spawn(process.execPath, [tsx, join(root, file)], { cwd: dir, env: { ...process.env, ...env }, stdio: ['ignore', 'ignore', 'pipe'] })
+  const p = spawn(process.execPath, [tsx, join(root, file)], { cwd: dir, env: childEnv({ MOCK_CHAIN_DB: process.env.MOCK_CHAIN_DB!, ...env }), stdio: ['ignore', 'ignore', 'pipe'] })
   p.stderr!.on('data', d => { if (/error/i.test(String(d)) && !/Refund from|ignored/.test(String(d))) process.stderr.write(d) })
   procs.push(p)
   return p

@@ -7,6 +7,7 @@ import { spawn, ChildProcess } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { PrivateKey } from '../shared/bsv.js'
 import { prepareMockChain } from './helpers/mockchain.js'
+import { childEnv } from './helpers/env.js'
 
 const PROXY_PORT = 5650, MARKET_PORT = 5680
 const PROXY = `http://127.0.0.1:${PROXY_PORT}`, MARKET = `http://localhost:${MARKET_PORT}`
@@ -22,7 +23,7 @@ await prepareMockChain(process.env.MOCK_CHAIN_DB)
 const tsx = createRequire(import.meta.url).resolve('tsx/cli')
 const procs: ChildProcess[] = []
 const start = (file: string, env: Record<string, string>) => {
-  const p = spawn(process.execPath, [tsx, join(root, file)], { cwd: dir, env: { ...process.env, ...env }, stdio: ['ignore', 'ignore', 'pipe'] })
+  const p = spawn(process.execPath, [tsx, join(root, file)], { cwd: dir, env: childEnv({ MOCK_CHAIN_DB: process.env.MOCK_CHAIN_DB!, ...env }), stdio: ['ignore', 'ignore', 'pipe'] })
   p.stderr!.on('data', d => { if (/error/i.test(String(d))) process.stderr.write(d) })
   procs.push(p)
 }
