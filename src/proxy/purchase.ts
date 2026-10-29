@@ -14,7 +14,7 @@
 // payer's identity key in a "refund" field; the proxy checks that it refunds one of this agent's payments,
 // verifies and internalizes it in the payer wallet, and records it in the audit log (the budget is given back).
 import { Transaction, type WalletInterface } from '../shared/bsv.js'
-import { payFetch, fetchQuote, readChallenge } from '../agent/pay-fetch.js'
+import { payFetch, fetchQuote, readChallenge, PaidNotDelivered } from '../agent/pay-fetch.js'
 import { acceptBrc29Payment, isBrc29Payment } from '../shared/payments.js'
 import type { Mutex } from '../shared/mutex.js'
 import type { OrderInfo, Quote } from '../shared/order.js'
@@ -223,6 +223,14 @@ export function createPurchaseEngine(d: PurchaseDeps) {
       return { kind: 'done', status: response.status, contentType, body, paidSats: paid?.amount ?? 0, txid: paid?.txid, refundedSats, requestId }
     } catch (err) {
       if (err instanceof PendingApproval) return { kind: 'pending', request: err.request }
+      if (err instanceof PaidNotDelivered) {
+        // The wallet has spent the money: keep the budget reserved and book the payment with its txid,
+        // so the audit log always matches the wallet
+        const { txid } = err.paid
+        await d.record({ agentId: a.agentId, url: a.url, amountSats, amountEur: eur(amountSats), purpose: a.purpose, decision: 'allow', txid, approvedBy, order, requestId, mandateId, reason: 'paid, merchant did not deliver' })
+        console.log(`⚠ ${a.agentId} paid ${fmt(eur(amountSats))} (${amountSats} sats) → ${a.url}, but the merchant did not deliver — tx ${txid}`)
+        return { kind: 'refused', status: 502, decision: 'allow', reason: err.message, requestId }
+      }
       if (reserved) await d.budget.release(a.agentId, reserved, order?.category) // payment failed: give the budget back
       const dec = decision && decision.kind !== 'allow' ? decision : undefined
       // "fetch failed" = the service did not answer at all (for example: the seller is not running)

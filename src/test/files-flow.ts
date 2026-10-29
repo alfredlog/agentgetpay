@@ -8,6 +8,7 @@ import { createRequire } from 'node:module'
 import http from 'node:http'
 import { PrivateKey } from '../shared/bsv.js'
 import { prepareMockChain } from './helpers/mockchain.js'
+import { childEnv } from './helpers/env.js'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 
@@ -33,7 +34,7 @@ const service = http.createServer((req, res) => {
 const tsx = createRequire(import.meta.url).resolve('tsx/cli')
 const procs: ChildProcess[] = []
 const start = (file: string, env: Record<string, string>) => {
-  const p = spawn(process.execPath, [tsx, join(root, file)], { cwd: dir, env: { ...process.env, ...env }, stdio: ['ignore', 'ignore', 'pipe'] })
+  const p = spawn(process.execPath, [tsx, join(root, file)], { cwd: dir, env: childEnv({ MOCK_CHAIN_DB: process.env.MOCK_CHAIN_DB!, ...env }), stdio: ['ignore', 'ignore', 'pipe'] })
   p.stderr!.on('data', d => { if (/error/i.test(String(d))) process.stderr.write(d) })
   procs.push(p)
 }
