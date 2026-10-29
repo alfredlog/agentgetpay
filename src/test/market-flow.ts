@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawn, ChildProcess } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { PrivateKey } from '@bsv/sdk'
+import { PrivateKey } from '../shared/bsv.js'
 
 const PROXY_PORT = 5450, MARKET_PORT = 5480
 const PROXY = `http://127.0.0.1:${PROXY_PORT}`, MARKET = `http://localhost:${MARKET_PORT}`

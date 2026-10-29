@@ -1,10 +1,11 @@
 // Offline test of the proxy: fake wallet, fake blockchain, seller with SKIP_BROADCAST=1.
 import 'dotenv/config'
-import { PrivateKey, Transaction, P2PKH, Broadcaster } from '@bsv/sdk'
+import { PrivateKey, Transaction, P2PKH, Broadcaster } from '../shared/bsv.js'
+import { addressNetwork } from '../shared/network.js'
 
 const key = PrivateKey.fromWif(process.env.BSV_WIF!)
 const funding = new Transaction()
-funding.addOutput({ lockingScript: new P2PKH().lock(key.toAddress('testnet')), satoshis: 100000 })
+funding.addOutput({ lockingScript: new P2PKH().lock(key.toAddress(addressNetwork())), satoshis: 100000 })
 
 // Fake blockchain: keeps the "broadcast" transactions in memory
 const chain = new Map<string, string>()
