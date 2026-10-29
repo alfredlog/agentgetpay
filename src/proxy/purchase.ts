@@ -7,33 +7,34 @@
 // days later — the proxy EXECUTES the purchase by itself (never above the approved amount), keeps the result
 // for the agent, and notifies it on its callback address if it gave one.
 //
-// Refunds: a merchant can send the money back (cancellation). It attaches the refund transaction in
-// the PAYMENT-REFUND header; the proxy checks that it really pays the company wallet, broadcasts it, and
-// records it in the audit log (the budget is given back).
-import { Transaction, P2PKH, type Broadcaster } from '../shared/bsv.js'
-import { payFetch, validOrder } from '../agent/pay-fetch.js'
-import type { ChainedUtxoProvider } from '../shared/utxo.js'
+// Payment: BRC-121 (@bsv/402-pay). The order details come from the merchant's free quote, so the policy
+// runs BEFORE anything is signed; then the payer wallet (wallet-toolbox) builds the payment.
+//
+// Refunds: a merchant can send the money back (cancellation). Its answer carries a BRC-29 payment to the
+// payer's identity key in a "refund" field; the proxy checks that it refunds one of this agent's payments,
+// verifies and internalizes it in the payer wallet, and records it in the audit log (the budget is given back).
+import { Transaction, type WalletInterface } from '../shared/bsv.js'
+import { payFetch, fetchQuote, readChallenge } from '../agent/pay-fetch.js'
+import { acceptBrc29Payment, isBrc29Payment } from '../shared/payments.js'
 import type { Mutex } from '../shared/mutex.js'
-import { decode, type OrderInfo } from '../shared/x402.js'
+import type { OrderInfo, Quote } from '../shared/order.js'
 import type { JsonPolicyEngine } from './policy.js'
 import { fmt, methodsOf } from './policy.js'
 import type { MemoryBudgetStore } from './budget.js'
 import { monthOf } from './budget.js'
-import type { Decision, Ledger, LedgerEntry, KeyStore } from './types.js'
+import type { Decision, Ledger, LedgerEntry } from './types.js'
 import type { RequestStore, StoredRequest, MandateTerms, CardTerms } from './requests.js'
 import type { CardRail } from '../card/rail.js'
 import type { IssuedCard } from '../card/issuer.js'
 import type { MandateStore } from './mandates.js'
 import type { ApprovalNotifier } from './approval.js'
-import { ArcadeBroadcaster } from '../shared/arcade.js'
 
 export interface PurchaseDeps {
   eurPerSat: number
   policy: JsonPolicyEngine
   budget: MemoryBudgetStore
-  keys: KeyStore
-  utxos: ChainedUtxoProvider
-  walletLock: Mutex
+  payer: () => Promise<WalletInterface> // the wallet that pays (a server wallet on this branch)
+  payerLock: Mutex                      // one payment at a time
   ledger: Ledger
   record: (e: Parameters<Ledger['record']>[0]) => Promise<unknown>
   requests: RequestStore
@@ -41,7 +42,6 @@ export interface PurchaseDeps {
   notifiers: ApprovalNotifier[]
   isActive: (agentId: string) => boolean
   checkTarget: (url: unknown, agentId: string) => string | undefined
-  broadcaster?: Broadcaster
   approvalTtlHours: number
   publicBase: string // for the result link given to the agent
   cards?: CardRail   // card rail (virtual cards), if enabled
@@ -112,31 +112,32 @@ export function createPurchaseEngine(d: PurchaseDeps) {
     waiters.set(id, r => { clearTimeout(timer); waiters.delete(id); resolve(r) })
   })
 
-  // ---- Refund announced by a merchant ----
-  const handleRefund = async (header: string | null, agentId: string, url: string): Promise<number | undefined> => {
-    if (!header) return undefined
+  // ---- Refund announced by a merchant: { refund: <BRC-29 payment> & { paymentTxid } } in a JSON answer ----
+  const handleRefund = async (body: Buffer, contentType: string, agentId: string, url: string): Promise<number | undefined> => {
+    if (!/json/i.test(contentType)) return undefined
+    let n: unknown
+    try { n = JSON.parse(body.toString('utf8'))?.refund } catch { return undefined }
+    if (n === undefined || n === null) return undefined
     try {
-      const n = decode<{ paymentTxid: string; refundTxid: string; rawtx: string }>(header)
-      const tx = Transaction.fromHex(n.rawtx)
-      if (tx.id('hex') !== n.refundTxid) throw new Error('refund transaction id mismatch')
-      const mine = new P2PKH().lock(d.keys.address(agentId)).toHex()
-      const sats = tx.outputs.filter(o => o.lockingScript.toHex() === mine).reduce((s, o) => s + (o.satoshis ?? 0), 0)
-      if (!sats) throw new Error('the refund does not pay the company wallet')
+      if (!isBrc29Payment(n) || typeof (n as { paymentTxid?: unknown }).paymentTxid !== 'string') throw new Error('malformed refund')
+      const p = n as typeof n & { paymentTxid: string }
+      if (Transaction.fromAtomicBEEF(p.tx).id('hex') !== p.txid) throw new Error('refund transaction id mismatch')
       const all = await d.ledger.all()
-      if (all.some(e => e.decision === 'refund' && e.txid === n.refundTxid)) return undefined // already recorded
-      const orig = all.find(e => e.decision === 'allow' && e.txid === n.paymentTxid)
+      if (all.some(e => e.decision === 'refund' && e.txid === p.txid)) return undefined // already recorded
+      const orig = all.find(e => e.decision === 'allow' && e.txid === p.paymentTxid)
       if (!orig || orig.agentId !== agentId) throw new Error('unknown payment')
-      const already = all.filter(e => e.decision === 'refund' && e.refundOf === n.paymentTxid).reduce((s, e) => s + e.amountSats, 0)
-      if (already + sats > orig.amountSats) throw new Error('refund larger than the payment')
-      // We broadcast it ourselves: a refund that is not broadcast is worth nothing
-      const r = await tx.broadcast(d.broadcaster ?? new ArcadeBroadcaster())
-      if (r.status !== 'success' && !/already|known|txn-already/i.test(JSON.stringify(r))) throw new Error('refund transaction rejected by the network')
+      const already = all.filter(e => e.decision === 'refund' && e.refundOf === p.paymentTxid).reduce((s, e) => s + e.amountSats, 0)
+      if (already + p.satoshis > orig.amountSats) throw new Error('refund larger than the payment')
+      // Checks that the output is ours and worth what is claimed, then internalizes it (the wallet verifies
+      // SPV and broadcasts it if needed): a refund that is not in our wallet is worth nothing
+      await acceptBrc29Payment(await d.payer(), p, undefined, `Refund of ${p.paymentTxid.slice(0, 16)}`)
+      const sats = p.satoshis
       await d.record({
         agentId, url, amountSats: sats, amountEur: eur(sats), purpose: orig.purpose, decision: 'refund',
-        txid: n.refundTxid, refundOf: n.paymentTxid, order: orig.order, reason: `Refund of ${fmt(orig.amountEur)} payment`
+        txid: p.txid, refundOf: p.paymentTxid, order: orig.order, reason: `Refund of ${fmt(orig.amountEur)} payment`
       })
       d.budget.credit(agentId, sats, orig.order?.category, orig.ts)
-      console.log(`↩ ${agentId} refunded ${fmt(eur(sats))} (${sats} sats) for ${n.paymentTxid.slice(0, 12)}…`)
+      console.log(`↩ ${agentId} refunded ${fmt(eur(sats))} (${sats} sats) for ${p.paymentTxid.slice(0, 12)}…`)
       return sats
     } catch (e) {
       console.error(`⚠ Refund from ${url} ignored:`, (e as Error).message)
@@ -167,11 +168,8 @@ export function createPurchaseEngine(d: PurchaseDeps) {
         headers: a.body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
         redirect: 'manual' // never follow a redirect: it could lead outside the allowed domains
       }, {
-        address: d.keys.address(a.agentId),
-        unlocker: () => d.keys.unlocker(a.agentId),
-        utxos: d.utxos,
-        spendLock: d.walletLock,
-        onSpent: tx => d.utxos.remember(tx), // the change pays for the next payment
+        wallet: await d.payer(),
+        spendLock: d.payerLock,
         beforePay: async offer => {
           amountSats = offer.amount
           order = offer.order
@@ -219,11 +217,10 @@ export function createPurchaseEngine(d: PurchaseDeps) {
         await d.record({ agentId: a.agentId, url: a.url, amountSats, amountEur: eur(amountSats), purpose: a.purpose, decision: 'allow', txid: paid.txid, approvedBy, order, requestId, mandateId })
         console.log(`✔ ${a.agentId} paid ${fmt(eur(amountSats))} (${amountSats} sats) → ${a.url}${approvedBy ? ` — approved by ${approvedBy}` : ''}`)
       }
-      const refundedSats = await handleRefund(response.headers.get('PAYMENT-REFUND'), a.agentId, a.url)
-      return {
-        kind: 'done', status: response.status, contentType: response.headers.get('content-type') ?? 'text/plain',
-        body: Buffer.from(await response.arrayBuffer()), paidSats: paid?.amount ?? 0, txid: paid?.txid, refundedSats, requestId
-      }
+      const contentType = response.headers.get('content-type') ?? 'text/plain'
+      const body = Buffer.from(await response.arrayBuffer())
+      const refundedSats = await handleRefund(body, contentType, a.agentId, a.url)
+      return { kind: 'done', status: response.status, contentType, body, paidSats: paid?.amount ?? 0, txid: paid?.txid, refundedSats, requestId }
     } catch (err) {
       if (err instanceof PendingApproval) return { kind: 'pending', request: err.request }
       if (reserved) await d.budget.release(a.agentId, reserved, order?.category) // payment failed: give the budget back
@@ -393,12 +390,15 @@ export function createPurchaseEngine(d: PurchaseDeps) {
 
   for (const n of d.notifiers) n.onDecision(decide)
 
-  // Reads a service's offer without paying (for a quote)
-  const quoteOrder = (header: string | null) => {
-    if (!header) return undefined
-    const offer = decode<{ accepts?: { amount: string }[]; resource?: { description?: string }; extensions?: { order?: unknown } }>(header)
-    return { sats: Number(offer.accepts?.[0]?.amount), description: offer.resource?.description, order: validOrder(offer.extensions?.order) }
+  // Price of a request without paying: the merchant's free quote (with the body), otherwise the BRC-121
+  // challenge of the route itself, asked WITHOUT the body so that nothing is ordered
+  const quote = async (url: string, method: string, body: unknown): Promise<{ kind: 'paid'; quote: Quote } | { kind: 'free'; status: number }> => {
+    const q = await fetchQuote(url, method, body !== undefined ? JSON.stringify(body) : undefined)
+    if (q && q.sats > 0) return { kind: 'paid', quote: q }
+    const r = await fetch(url, { method, redirect: 'manual' })
+    const c = readChallenge(r)
+    return c ? { kind: 'paid', quote: { sats: c.amount } } : { kind: 'free', status: r.status }
   }
 
-  return { attempt, decide, execute, settleInline, requestMandate, requestCard, sweep, resume, quoteOrder, usedByMandate }
+  return { attempt, decide, execute, settleInline, requestMandate, requestCard, sweep, resume, quote, usedByMandate }
 }

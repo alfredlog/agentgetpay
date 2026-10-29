@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path'
 import { spawn, ChildProcess } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { PrivateKey } from '../shared/bsv.js'
+import { prepareMockChain } from './helpers/mockchain.js'
 
 const PROXY_PORT = 5350, SELLER_PORT = 5390
 const PROXY = `http://127.0.0.1:${PROXY_PORT}`, SHOP = `http://localhost:${SELLER_PORT}`
@@ -14,6 +15,9 @@ const root = resolve('.')
 const dir = mkdtempSync(join(tmpdir(), 'agentgetpay-purchase-'))
 cpSync(join(root, 'config'), join(dir, 'config'), { recursive: true })
 writeFileSync(join(dir, '.env'), `BSV_WIF=${PrivateKey.fromRandom().toWif()}\nADMIN_TOKEN=${ADMIN}\nSELLER_SECRET=test-seller-secret\n`)
+// Shared offline chain (wallet-toolbox mock chain) for every process started below
+process.env.MOCK_CHAIN_DB = join(dir, 'chain.sqlite')
+await prepareMockChain(process.env.MOCK_CHAIN_DB)
 
 const tsx = createRequire(import.meta.url).resolve('tsx/cli')
 const procs: ChildProcess[] = []
@@ -24,7 +28,7 @@ const start = (file: string, env: Record<string, string>) => {
   return p
 }
 const startProxy = () => start('src/test/proxy-flow.ts', { PROXY_PORT: String(PROXY_PORT), TELEGRAM_BOT_TOKEN: '', APPROVAL_AUTO: 'approved' })
-start('src/seller/server.ts', { SELLER_PORT: String(SELLER_PORT), SKIP_BROADCAST: '1' })
+start('src/seller/server.ts', { SELLER_PORT: String(SELLER_PORT) })
 let proxy = startProxy()
 
 let failures = 0

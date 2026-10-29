@@ -7,6 +7,7 @@ import { spawn, ChildProcess } from 'node:child_process'
 import { createRequire } from 'node:module'
 import http from 'node:http'
 import { PrivateKey } from '../shared/bsv.js'
+import { prepareMockChain } from './helpers/mockchain.js'
 
 const PROXY_PORT = 5550, MARKET_PORT = 5580, HOOK_PORT = 5590
 const PROXY = `http://127.0.0.1:${PROXY_PORT}`, MARKET = `http://localhost:${MARKET_PORT}`
@@ -15,6 +16,9 @@ const root = resolve('.')
 const dir = mkdtempSync(join(tmpdir(), 'agentgetpay-approval-'))
 cpSync(join(root, 'config'), join(dir, 'config'), { recursive: true })
 writeFileSync(join(dir, '.env'), `BSV_WIF=${PrivateKey.fromRandom().toWif()}\nADMIN_TOKEN=${ADMIN}\nMARKET_SECRET=test-market-secret-123456\n`)
+// Shared offline chain (wallet-toolbox mock chain) for every process started below
+process.env.MOCK_CHAIN_DB = join(dir, 'chain.sqlite')
+await prepareMockChain(process.env.MOCK_CHAIN_DB)
 
 // The agent's callback address: we record what it receives
 const hooks: any[] = []
@@ -30,7 +34,7 @@ const start = (file: string, env: Record<string, string>) => {
 }
 // No Telegram, no automatic answer: only the dashboard decides
 const startProxy = (env: Record<string, string> = {}) => start('src/test/proxy-flow.ts', { PROXY_PORT: String(PROXY_PORT), TELEGRAM_BOT_TOKEN: '', APPROVAL_AUTO: '', ...env })
-start('src/market/server.ts', { MARKET_PORT: String(MARKET_PORT), MARKET_SKIP_BROADCAST: '1' })
+start('src/market/server.ts', { MARKET_PORT: String(MARKET_PORT) })
 let proxy = startProxy()
 
 let failures = 0
@@ -104,11 +108,11 @@ try {
   check(rej.status === 'rejected' && rej.decidedBy === 'Alfred (dashboard)' && ledger.some((e: any) => e.decision === 'deny' && e.requestId === rejId), 'A rejected request is closed and recorded as blocked')
   check((await adminCall(`/v1/admin/approvals/${rejId}`, 'POST', { approve: true })).status === 404, 'A decided request cannot be decided again')
 
-  // 7. Cancellation: refund in BSV, verified and recorded
+  // 7. Cancellation: BRC-29 refund in BSV, verified, internalized and recorded
   const before = (await agent('/v1/me')).json.spentMonthEur
   r = await agent('/v1/fetch', 'POST', { url: `${MARKET}/api/cancel`, method: 'POST', body: { order: booking }, purpose: 'Trip cancelled' })
   const refunded = Number(r.headers.get('X-Refunded-Sats'))
-  check(r.status === 200 && refunded > 17000 && refunded < 17800, `Cancelling the booking refunds ${refunded} sats (17800 minus the network fee)`)
+  check(r.status === 200 && refunded === 17800, `Cancelling the booking refunds ${refunded} sats (BRC-29 refund of the full 17800; the merchant pays the fee)`)
   const after = (await agent('/v1/me')).json.spentMonthEur
   check(Math.abs(before - after - refunded * 0.01) < 0.001, `The monthly budget gets the money back (€${before} → €${after})`)
   ledger = (await adminCall('/v1/ledger')).json

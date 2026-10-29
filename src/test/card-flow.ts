@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path'
 import { spawn, ChildProcess } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { PrivateKey } from '../shared/bsv.js'
+import { prepareMockChain } from './helpers/mockchain.js'
 
 const PROXY_PORT = 5650, MARKET_PORT = 5680
 const PROXY = `http://127.0.0.1:${PROXY_PORT}`, MARKET = `http://localhost:${MARKET_PORT}`
@@ -14,6 +15,9 @@ const root = resolve('.')
 const dir = mkdtempSync(join(tmpdir(), 'agentgetpay-card-'))
 cpSync(join(root, 'config'), join(dir, 'config'), { recursive: true })
 writeFileSync(join(dir, '.env'), `BSV_WIF=${PrivateKey.fromRandom().toWif()}\nADMIN_TOKEN=${ADMIN}\nMARKET_SECRET=test-market-secret-123456\nCARD_NETWORK_KEY=${NETWORK_KEY}\n`)
+// Shared offline chain (wallet-toolbox mock chain) for every process started below
+process.env.MOCK_CHAIN_DB = join(dir, 'chain.sqlite')
+await prepareMockChain(process.env.MOCK_CHAIN_DB)
 
 const tsx = createRequire(import.meta.url).resolve('tsx/cli')
 const procs: ChildProcess[] = []
@@ -23,7 +27,7 @@ const start = (file: string, env: Record<string, string>) => {
   procs.push(p)
 }
 start('src/test/proxy-flow.ts', { PROXY_PORT: String(PROXY_PORT), TELEGRAM_BOT_TOKEN: '', APPROVAL_AUTO: '' })
-start('src/market/server.ts', { MARKET_PORT: String(MARKET_PORT), MARKET_SKIP_BROADCAST: '1', CARD_NETWORK_URL: PROXY })
+start('src/market/server.ts', { MARKET_PORT: String(MARKET_PORT), CARD_NETWORK_URL: PROXY })
 
 let failures = 0
 const check = (ok: boolean, label: string) => { console.log(`${ok ? '✓' : '✗'} ${label}`); if (!ok) failures++ }
