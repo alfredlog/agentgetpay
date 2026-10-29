@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path'
 import { spawn, ChildProcess } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { PrivateKey } from '../shared/bsv.js'
+import { prepareMockChain } from './helpers/mockchain.js'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { UnauthorizedError, type OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js'
@@ -18,6 +19,9 @@ const root = resolve('.')
 const dir = mkdtempSync(join(tmpdir(), 'agentgetpay-oauth-'))
 cpSync(join(root, 'config'), join(dir, 'config'), { recursive: true })
 writeFileSync(join(dir, '.env'), `BSV_WIF=${PrivateKey.fromRandom().toWif()}\nADMIN_TOKEN=${ADMIN}\n`)
+// Shared offline chain (wallet-toolbox mock chain) for every process started below
+process.env.MOCK_CHAIN_DB = join(dir, 'chain.sqlite')
+await prepareMockChain(process.env.MOCK_CHAIN_DB)
 
 const tsx = createRequire(import.meta.url).resolve('tsx/cli')
 const procs: ChildProcess[] = []

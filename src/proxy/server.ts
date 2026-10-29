@@ -21,7 +21,8 @@ import { DatevExporter, loadAccountingConfig, monthlyStatementHtml } from './acc
 import { AgentRegistry, validateRules, validAgentId } from './registry.js'
 import { ViewerStore, validViewerName } from './viewers.js'
 import { OAuthServer } from './oauth.js'
-import type { Broadcaster } from '../shared/bsv.js'
+import type { Broadcaster, WalletInterface } from '../shared/bsv.js'
+import { openServerWallet } from '../shared/wallet.js'
 import { explorerTx, wocExplorer } from '../shared/network.js'
 
 
@@ -58,7 +59,17 @@ if (ADMIN_TOKEN.length < 12) {
   appendFileSync('.env', `\nADMIN_TOKEN=${ADMIN_TOKEN}\n`)
   console.log(`Admin password created and saved in .env: ${ADMIN_TOKEN}`)
 }
-const keys = new EnvKeyStore(process.env.BSV_WIF!)
+const keys = new EnvKeyStore(process.env.BSV_WIF!) // signs the audit-log anchors
+// The payer wallet (wallet-toolbox) pays the BRC-121 purchases and receives the refunds.
+// On this branch it is a server wallet with its own root key; it is created once and never printed.
+let PAYER_ROOT_KEY = process.env.PAYER_ROOT_KEY ?? ''
+if (!/^[0-9a-f]{64}$/i.test(PAYER_ROOT_KEY)) {
+  PAYER_ROOT_KEY = randomBytes(32).toString('hex')
+  appendFileSync('.env', `\nPAYER_ROOT_KEY=${PAYER_ROOT_KEY}\n`)
+  process.env.PAYER_ROOT_KEY = PAYER_ROOT_KEY
+  console.log('Payer wallet key created and saved in .env')
+}
+export const openPayerWallet = () => openServerWallet({ rootKeyHex: PAYER_ROOT_KEY, filePath: process.env.PAYER_WALLET_FILE ?? 'data/payer-wallet.sqlite', databaseName: 'payer_wallet' })
 const ledger = new JsonlLedger('data/ledger.jsonl')
 budget.restoreFrom(ledger.allSync()) // today's spending survives a restart
 const anchorLog = new AnchorLog('data/anchors.jsonl')
@@ -128,10 +139,12 @@ function checkTarget(url: unknown, allowed: string[] | undefined): string | unde
 
 export function createProxy(
   inner: UtxoProvider = new WhatsOnChainUtxoProvider(),
-  opts: { broadcaster?: Broadcaster; fetchTxHex?: FetchTxHex } = {}
+  opts: { broadcaster?: Broadcaster; fetchTxHex?: FetchTxHex; payer?: Promise<WalletInterface> } = {}
 ) {
   const utxos = new ChainedUtxoProvider(inner)
-  const walletLock = new Mutex() // payments and anchors spend the same wallet, one at a time
+  const walletLock = new Mutex() // anchors spend the P2PKH wallet one at a time
+  const payerReady = opts.payer ?? openPayerWallet()
+  payerReady.catch(e => console.error('⚠ Payer wallet unavailable:', (e as Error).message))
   const rail = new BsvAnchorRail(keys.address('company'), () => keys.unlocker('company'), utxos, walletLock, opts.broadcaster)
   const fetchTxHex = opts.fetchTxHex ?? cachedWocFetch
 
@@ -194,11 +207,10 @@ export function createProxy(
 
   // The purchase engine: rules, mandates, approvals (even long ones), payment, refunds
   const engine = createPurchaseEngine({
-    eurPerSat: EUR_PER_SAT, policy, budget, keys, utxos, walletLock, ledger, record, requests, mandates,
+    eurPerSat: EUR_PER_SAT, policy, budget, payer: () => payerReady, payerLock: new Mutex(), ledger, record, requests, mandates,
     notifiers: [notifier],
     isActive: id => registry.isActive(id),
     checkTarget: (url, agentId) => checkTarget(url, registry.rulesFor(agentId)?.allowed_domains),
-    broadcaster: opts.broadcaster,
     approvalTtlHours: APPROVAL_TTL_HOURS,
     publicBase: ISSUER,
     cards,
@@ -283,13 +295,12 @@ export function createProxy(
       return res.status(400).json({ error: 'callbackUrl must be on one of your allowed domains' })
     }
 
-    // Quote: asks for the price without paying (the request is sent without a body, nothing is recorded)
+    // Quote: asks for the price without paying (the merchant's free quote, or the route without a body; nothing is recorded)
     if (dryRun) {
       try {
-        const r = await fetch(url, { method, redirect: 'manual' })
-        if (r.status !== 402) return res.json({ paymentRequired: false, status: r.status })
-        const q = engine.quoteOrder(r.headers.get('PAYMENT-REQUIRED'))
-        if (!q || !Number.isFinite(q.sats)) return res.status(502).json({ error: 'The service returned an unreadable price' })
+        const out = await engine.quote(url, method, body)
+        if (out.kind === 'free') return res.json({ paymentRequired: false, status: out.status })
+        const q = out.quote
         const amountEur = q.sats * EUR_PER_SAT
         const d = await policy.evaluate({ agentId: agent.id, url, amountSats: q.sats, amountEur, purpose, order: q.order })
         return res.json({

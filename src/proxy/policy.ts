@@ -2,7 +2,7 @@
 // Like a company's purchasing policy: daily/monthly budgets, allowed merchants,
 // per-category rules (hotel max €150/night…), allowed delivery addresses, human approval.
 import { PolicyEngine, PaymentRequest, Decision, BudgetStore } from './types.js'
-import type { ShippingAddress } from '../shared/x402.js'
+import type { ShippingAddress } from '../shared/order.js'
 
 // Rules of one purchase category. Everything is optional.
 export interface CategoryRule {

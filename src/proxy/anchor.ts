@@ -9,8 +9,7 @@ import { Transaction, P2PKH, LockingScript, Utils, Broadcaster } from '../shared
 import { UtxoProvider } from '../shared/utxo.js'
 import { Mutex } from '../shared/mutex.js'
 import { getTxHex } from '../woc.js'
-import type { LedgerEntry } from './types.js'
-import type { Unlocker } from '../agent/pay-fetch.js'
+import type { LedgerEntry, Unlocker } from './types.js'
 import { ArcadeBroadcaster } from '../shared/arcade.js'
 
 const PROTOCOL = 'agentpay-v1'
