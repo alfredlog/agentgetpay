@@ -6,6 +6,8 @@ import { join, resolve } from 'node:path'
 import { spawn, ChildProcess } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { PrivateKey } from '../shared/bsv.js'
+import { prepareMockChain } from './helpers/mockchain.js'
+import { childEnv } from './helpers/env.js'
 
 const PROXY_PORT = 5450, MARKET_PORT = 5480
 const PROXY = `http://127.0.0.1:${PROXY_PORT}`, MARKET = `http://localhost:${MARKET_PORT}`
@@ -14,16 +16,19 @@ const root = resolve('.')
 const dir = mkdtempSync(join(tmpdir(), 'agentgetpay-market-'))
 cpSync(join(root, 'config'), join(dir, 'config'), { recursive: true })
 writeFileSync(join(dir, '.env'), `BSV_WIF=${PrivateKey.fromRandom().toWif()}\nADMIN_TOKEN=${ADMIN}\nMARKET_SECRET=test-market-secret-123456\n`)
+// Shared offline chain (wallet-toolbox mock chain) for every process started below
+process.env.MOCK_CHAIN_DB = join(dir, 'chain.sqlite')
+await prepareMockChain(process.env.MOCK_CHAIN_DB)
 
 const tsx = createRequire(import.meta.url).resolve('tsx/cli')
 const procs: ChildProcess[] = []
 const start = (file: string, env: Record<string, string>) => {
-  const p = spawn(process.execPath, [tsx, join(root, file)], { cwd: dir, env: { ...process.env, ...env }, stdio: ['ignore', 'ignore', 'pipe'] })
+  const p = spawn(process.execPath, [tsx, join(root, file)], { cwd: dir, env: childEnv({ MOCK_CHAIN_DB: process.env.MOCK_CHAIN_DB!, ...env }), stdio: ['ignore', 'ignore', 'pipe'] })
   p.stderr!.on('data', d => { if (/error/i.test(String(d))) process.stderr.write(d) })
   procs.push(p)
 }
 start('src/test/proxy-flow.ts', { PROXY_PORT: String(PROXY_PORT), TELEGRAM_BOT_TOKEN: '', APPROVAL_AUTO: 'approved' })
-start('src/market/server.ts', { MARKET_PORT: String(MARKET_PORT), MARKET_SKIP_BROADCAST: '1' })
+start('src/market/server.ts', { MARKET_PORT: String(MARKET_PORT) })
 
 let failures = 0
 const check = (ok: boolean, label: string) => { console.log(`${ok ? '✓' : '✗'} ${label}`); if (!ok) failures++ }

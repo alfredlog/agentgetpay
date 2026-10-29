@@ -6,7 +6,7 @@
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
-import type { OrderInfo } from '../shared/x402.js'
+import type { OrderInfo } from '../shared/order.js'
 
 export type RequestStatus =
   | 'pending'    // waiting for a decision

@@ -8,13 +8,13 @@
 // a function"). Loading the CJS build here with `require`, exactly as wallet-toolbox
 // does, makes Node's module cache hand both of them the very same objects.
 import { createRequire } from 'node:module'
-import type * as SDK from '@bsv/sdk'
+import type * as SDK from '@bsv/sdk' with { 'resolution-mode': 'require' } // types of the CJS build too
 
 const require = createRequire(import.meta.url)
 const sdk: typeof SDK = require('@bsv/sdk')
 
 // Values (classes, namespaces) used by the project. Add a name here when you need it.
-export const { PrivateKey, Transaction, P2PKH, LockingScript, MerklePath, Utils, Hash } = sdk
+export const { PrivateKey, PublicKey, Transaction, Beef, P2PKH, LockingScript, Script, MerklePath, CachedKeyDeriver, Random, Utils, Hash } = sdk
 
 // Classes are also types: re-export their instance types under the same names.
 export type PrivateKey = SDK.PrivateKey
@@ -22,7 +22,16 @@ export type Transaction = SDK.Transaction
 export type P2PKH = SDK.P2PKH
 export type LockingScript = SDK.LockingScript
 export type MerklePath = SDK.MerklePath
-export type { Broadcaster, BroadcastResponse, BroadcastFailure, ChainTracker } from '@bsv/sdk'
+export type PublicKey = SDK.PublicKey
+export type Beef = SDK.Beef
+export type Script = SDK.Script
+export type CachedKeyDeriver = SDK.CachedKeyDeriver
+export type Broadcaster = SDK.Broadcaster
+export type BroadcastResponse = SDK.BroadcastResponse
+export type BroadcastFailure = SDK.BroadcastFailure
+export type ChainTracker = SDK.ChainTracker
+export type WalletInterface = SDK.WalletInterface
+export type WalletProtocol = SDK.WalletProtocol
 
 // The CJS module object itself, for checks (see src/test/bsv-flow.ts).
 export const sdkModule = sdk
