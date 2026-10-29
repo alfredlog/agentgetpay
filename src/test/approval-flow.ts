@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path'
 import { spawn, ChildProcess } from 'node:child_process'
 import { createRequire } from 'node:module'
 import http from 'node:http'
-import { PrivateKey } from '../shared/bsv.js'
+import { PrivateKey } from '@bsv/sdk'
 
 const PROXY_PORT = 5550, MARKET_PORT = 5580, HOOK_PORT = 5590
 const PROXY = `http://127.0.0.1:${PROXY_PORT}`, MARKET = `http://localhost:${MARKET_PORT}`
