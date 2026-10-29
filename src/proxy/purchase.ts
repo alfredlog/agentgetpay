@@ -10,7 +10,7 @@
 // Refunds: a merchant can send the money back (cancellation). It attaches the refund transaction in
 // the PAYMENT-REFUND header; the proxy checks that it really pays the company wallet, broadcasts it, and
 // records it in the audit log (the budget is given back).
-import { Transaction, P2PKH, WhatsOnChainBroadcaster, type Broadcaster } from '@bsv/sdk'
+import { Transaction, P2PKH, type Broadcaster } from '../shared/bsv.js'
 import { payFetch, validOrder } from '../agent/pay-fetch.js'
 import type { ChainedUtxoProvider } from '../shared/utxo.js'
 import type { Mutex } from '../shared/mutex.js'
@@ -25,6 +25,7 @@ import type { CardRail } from '../card/rail.js'
 import type { IssuedCard } from '../card/issuer.js'
 import type { MandateStore } from './mandates.js'
 import type { ApprovalNotifier } from './approval.js'
+import { ArcadeBroadcaster } from '../shared/arcade.js'
 
 export interface PurchaseDeps {
   eurPerSat: number
@@ -128,7 +129,7 @@ export function createPurchaseEngine(d: PurchaseDeps) {
       const already = all.filter(e => e.decision === 'refund' && e.refundOf === n.paymentTxid).reduce((s, e) => s + e.amountSats, 0)
       if (already + sats > orig.amountSats) throw new Error('refund larger than the payment')
       // We broadcast it ourselves: a refund that is not broadcast is worth nothing
-      const r = await tx.broadcast(d.broadcaster ?? new WhatsOnChainBroadcaster('test'))
+      const r = await tx.broadcast(d.broadcaster ?? new ArcadeBroadcaster())
       if (r.status !== 'success' && !/already|known|txn-already/i.test(JSON.stringify(r))) throw new Error('refund transaction rejected by the network')
       await d.record({
         agentId, url, amountSats: sats, amountEur: eur(sats), purpose: orig.purpose, decision: 'refund',
