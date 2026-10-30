@@ -21,7 +21,8 @@ check(sdkSeenByToolbox.Transaction === Transaction, 'Transaction is one class in
 
 // Every file goes through src/shared/bsv.ts: no direct import of @bsv/sdk elsewhere
 const walk = (d: string): string[] => readdirSync(d).flatMap(f => { const p = join(d, f); return statSync(p).isDirectory() ? walk(p) : p.endsWith('.ts') ? [p] : [] })
-const direct = walk('src').filter(f => !f.endsWith(join('shared', 'bsv.ts')))
+// (src/web/bsv-browser.ts is the browser bundle's stand-in for bsv.ts: no CommonJS in a browser)
+const direct = walk('src').filter(f => !f.endsWith(join('shared', 'bsv.ts')) && !f.endsWith(join('web', 'bsv-browser.ts')))
   .filter(f => /from\s+['"]@bsv\/sdk|import\(\s*['"]@bsv\/sdk|require\(\s*['"]@bsv\/sdk/.test(readFileSync(f, 'utf8')))
 check(direct.length === 0, `no file imports @bsv/sdk directly${direct.length ? ': ' + direct.map(f => relative('.', f)).join(', ') : ''}`)
 // @bsv/402-pay also has an ESM build (with the ESM SDK): only src/shared/brc121.ts loads it

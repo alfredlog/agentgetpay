@@ -1,13 +1,13 @@
 // An "agent" that calls the paid API and pays by itself (BRC-121), without the proxy.
-// It uses the payer wallet (PAYER_ROOT_KEY, created by the proxy): do not run it while the proxy runs.
+// It uses the agent's own wallet (data/agents/<id>/, created by the proxy): do not run it while the proxy runs.
+// The wallet only holds what an allowance top-up gave it (see src/allowance).
 import 'dotenv/config'
 import { payFetch } from './pay-fetch.js'
-import { openServerWallet } from '../shared/wallet.js'
+import { LocalAgentSigners } from '../allowance/agent-signer.js'
 import { explorerTx } from '../shared/network.js'
 
-if (!process.env.PAYER_ROOT_KEY) throw new Error('PAYER_ROOT_KEY missing in .env (start the proxy once: npm run proxy)')
-const wallet = await openServerWallet({ rootKeyHex: process.env.PAYER_ROOT_KEY, filePath: process.env.PAYER_WALLET_FILE ?? 'data/payer-wallet.sqlite', databaseName: 'payer_wallet' })
 const url = process.argv[2] ?? 'http://localhost:4000/api/quote'
+const wallet = await new LocalAgentSigners().get(process.argv[3] ?? process.env.AGENT_ID ?? 'demo-agent').wallet()
 
 const { response, paid } = await payFetch(url, { method: 'GET' }, { wallet, maxSats: 1000 })
 

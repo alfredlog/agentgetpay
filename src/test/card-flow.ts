@@ -8,6 +8,7 @@ import { createRequire } from 'node:module'
 import { PrivateKey } from '../shared/bsv.js'
 import { prepareMockChain } from './helpers/mockchain.js'
 import { childEnv } from './helpers/env.js'
+import { fundTestAllowance } from './helpers/company.js'
 
 const PROXY_PORT = 5650, MARKET_PORT = 5680
 const PROXY = `http://127.0.0.1:${PROXY_PORT}`, MARKET = `http://localhost:${MARKET_PORT}`
@@ -54,6 +55,7 @@ try {
     shipping_addresses: [company],
     payment_methods: ['bsv', 'card'], card_only_if_no_bsv: false // the demo market accepts both: allow cards there
   } })).json.apiKey
+  await fundTestAllowance(PROXY, ADMIN, 'einkauf-01') // the company funds the agent's allowance (BSV Desktop stand-in)
 
   // 1. A small card, within policy: issued at once
   let r = await agent('/v1/cards', 'POST', { merchantName: 'Bürobedarf Weber', merchantDomain: 'localhost', category: 'office.supplies', amountEur: 30, items: [{ name: 'Name badge', quantity: 10, unitPriceEur: 3 }], purpose: 'Badges for the booth' })
@@ -129,10 +131,14 @@ try {
   check(list.length === 3 && list.every(c => !('numberHash' in c) && !('number' in c)), 'Card lists never contain card numbers')
 
   // 10. The COMPANY chooses how each agent pays
-  const mk = async (id: string, extra: Record<string, unknown>) => (await adminCall('/v1/admin/agents', 'POST', { id, rules: {
-    daily_budget_eur: 300, max_per_payment_eur: 200, approval_above_eur: 150, allowed_domains: 'localhost',
-    categories: { 'travel.hotel': { max_unit_price_eur: 150 }, 'office.supplies': { max_unit_price_eur: 50 } }, shipping_addresses: [company], ...extra
-  } })).json.apiKey
+  const mk = async (id: string, extra: Record<string, unknown>) => {
+    const k = (await adminCall('/v1/admin/agents', 'POST', { id, rules: {
+      daily_budget_eur: 300, max_per_payment_eur: 200, approval_above_eur: 150, allowed_domains: 'localhost',
+      categories: { 'travel.hotel': { max_unit_price_eur: 150 }, 'office.supplies': { max_unit_price_eur: 50 } }, shipping_addresses: [company], ...extra
+    } })).json.apiKey
+    await fundTestAllowance(PROXY, ADMIN, id, 200_000)
+    return k
+  }
   const asAgent = async (k: string, fn: () => Promise<any>) => { const old = key; key = k; try { return await fn() } finally { key = old } }
   const officeCard = { merchantName: 'Bürobedarf Weber', merchantDomain: 'localhost', category: 'office.supplies', amountEur: 5, purpose: 'Pens' }
 
