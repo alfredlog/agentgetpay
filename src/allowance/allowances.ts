@@ -5,7 +5,9 @@
 //            and the BEEF (SPV), then stores the UTXO with its BEEF ancestry (data/allowances.json)
 //   topUp    when a purchase is allowed: the proxy spends the allowance just in time, one BRC-29 output
 //            to the agent's wallet (price + fee buffer), change back to the SAME script, fee from the
-//            allowance; agent and policy sign; broadcast (Arcade, EF); the agent wallet internalizes it
+//            allowance. The AGENT (its MCP server) checks and co-signs it through a step of /v1/fetch, the
+//            proxy checks the agent's signatures, adds the policy signatures and broadcasts (Arcade, EF).
+//            The agent wallet internalizes it on its side: the proxy holds no agent key.
 //   reclaim  the company spends every UTXO back to its own wallet (BSV Desktop); the proxy marks it closed
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
@@ -13,11 +15,14 @@ import {
   Beef, LockingScript, P2PKH, PublicKey, Random, SatoshisPerKilobyte, Transaction, Utils,
   type Broadcaster, type ChainTracker, type WalletInterface
 } from '../shared/bsv.js'
-import { BRC29_PROTOCOL, acceptBrc29Payment } from '../shared/payments.js'
-import { spendableSats } from '../shared/wallet.js'
-import type { Mutex } from '../shared/mutex.js'
-import type { AgentSigners } from './agent-signer.js'
-import { ALLOWANCE_PROTOCOL, AllowanceScript, companyKeyId, policyKeyId, walletPubKey, walletSigner, type AllowanceKeys } from './script.js'
+import { BRC29_PROTOCOL, type Brc29Payment } from '../shared/payments.js'
+import type { KeyedMutex } from '../shared/mutex.js'
+import type { AgentKeys } from './agent-keys.js'
+import type { TopupInfo } from './agent-signer.js'
+import {
+  ALLOWANCE_PROTOCOL, AllowanceScript, companyKeyId, describeTx, policyKeyId, sighashFor, verifyHashSignature, walletPubKey, walletSigner,
+  type AllowanceKeys, type TxDescription
+} from './script.js'
 
 export interface AllowanceUtxo { txid: string; vout: number; satoshis: number; beef: string /* AtomicBEEF, hex */ }
 export interface Allowance {
@@ -64,15 +69,18 @@ class AllowanceStore {
 export interface AllowanceDeps {
   file?: string
   policyWallet: () => Promise<WalletInterface>
-  agents: AgentSigners
+  agentKeys: (agentId: string) => AgentKeys | undefined // registered by the agent itself
   chainTracker: () => Promise<ChainTracker>
   broadcaster: () => Promise<Broadcaster>
-  lock: Mutex
+  lock: KeyedMutex // per agent
   eurPerSat: number
   record: (e: { agentId: string; url: string; amountSats: number; amountEur: number; decision: 'admin'; action: string; txid?: string; reason: string; approvedBy?: string }) => Promise<unknown>
   feeSatPerKb?: number   // fee rate of the top-up transactions
   feeBufferSats?: number // added to each top-up: the agent wallet pays the BRC-121 payment's own fee
 }
+
+// Asks the agent to check and co-sign a top-up: returns one DER signature (hex) per input
+export type Cosign = (tx: TxDescription, sighashes: string[], topup: TopupInfo) => Promise<string[]>
 
 const sum = (u: { satoshis: number }[]) => u.reduce((s, x) => s + x.satoshis, 0)
 
@@ -85,7 +93,8 @@ export function createAllowances(d: AllowanceDeps) {
 
   // agentPub and policyPub of an agent's allowance (the company adds its own derived key)
   async function keys(agentId: string) {
-    const agentPub = await d.agents.get(agentId).allowancePubKey()
+    const agentPub = d.agentKeys(agentId)?.allowancePubKey
+    if (!agentPub) throw new Error(`Agent ${agentId} has not registered its key yet: start its MCP server once (it registers automatically)`)
     const policyPub = await walletPubKey(await d.policyWallet(), policyKeyId(agentId))
     return { agentPub, policyPub, protocolID: ALLOWANCE_PROTOCOL, companyKeyID: companyKeyId(agentId) }
   }
@@ -110,7 +119,7 @@ export function createAllowances(d: AllowanceDeps) {
   }
 
   // ---- Funding by the company: check the script, the amount and the BEEF, then store the UTXO ----
-  const fund = (agentId: string, f: { beef: number[]; outputIndex: number; companyPub: string }, by?: string) => d.lock.run(async () => {
+  const fund = (agentId: string, f: { beef: number[]; outputIndex: number; companyPub: string }, by?: string) => d.lock.for(agentId).run(async () => {
     if (!Array.isArray(f.beef) || !f.beef.length || f.beef.length > 10_000_000) throw new Error('beef must be an AtomicBEEF byte array')
     const tx = Transaction.fromAtomicBEEF(f.beef)
     const out = tx.outputs[f.outputIndex]
@@ -135,11 +144,12 @@ export function createAllowances(d: AllowanceDeps) {
   })
 
   // ---- Just-in-time top-up: the agent wallet must hold `amountSats` + fee buffer ----
-  const ensureFunds = (agentId: string, amountSats: number, forUrl: string) => d.lock.run(async () => {
-    const agent = d.agents.get(agentId)
-    const agentWallet = await agent.wallet()
+  // `walletSats` is what the agent says its wallet holds (only the missing part is sent). `cosign` asks the
+  // agent for its signatures of the top-up; they are checked here against the registered agentPub.
+  // Returns the BRC-29 payment the agent internalizes, or undefined if its wallet already holds enough.
+  const ensureFunds = (agentId: string, amountSats: number, forUrl: string, walletSats: number, cosign: Cosign) => d.lock.for(agentId).run(async (): Promise<Brc29Payment | undefined> => {
     const need = amountSats + buffer
-    const missing = need - await spendableSats(agentWallet)
+    const missing = need - Math.max(0, Number.isSafeInteger(walletSats) ? walletSats : 0)
     if (missing <= 0) return undefined // refunds or a previous buffer already cover it
 
     const a = store.get(agentId)
@@ -149,13 +159,20 @@ export function createAllowances(d: AllowanceDeps) {
     // BRC-29 output to the agent: derived by the policy wallet (sender) for the agent's identity key
     const policyWallet = await d.policyWallet()
     const policyIdentity = (await policyWallet.getPublicKey({ identityKey: true })).publicKey
-    const agentIdentity = await agent.identityKey()
+    const agentIdentity = d.agentKeys(agentId)?.identityKey
+    if (!agentIdentity) throw new Error(`Agent ${agentId} has not registered its keys`)
     const derivationPrefix = Utils.toBase64(Random(16))
     const derivationSuffix = Utils.toBase64(Random(16))
     const { publicKey } = await policyWallet.getPublicKey({ protocolID: BRC29_PROTOCOL, keyID: `${derivationPrefix} ${derivationSuffix}`, counterparty: agentIdentity, forSelf: false })
 
-    // Inputs: the largest UTXOs first, until they cover the top-up and the fee
-    const unlock = template.unlock(agent.signAllowance, walletSigner(policyWallet, policyKeyId(agentId)))
+    // Inputs: the largest UTXOs first, until they cover the top-up and the fee.
+    // The agent's signatures are only known after the fee is set: they come from `agentSigs` below.
+    const agentSigs = new Map<string, number[]>()
+    const unlock = template.unlock(async h => {
+      const sig = agentSigs.get(Utils.toHex(h))
+      if (!sig) throw new Error('missing agent signature')
+      return sig
+    }, walletSigner(policyWallet, policyKeyId(agentId)))
     const build = async (inputs: AllowanceUtxo[]) => {
       const tx = new Transaction()
       for (const u of inputs) tx.addInput({ sourceTransaction: Transaction.fromAtomicBEEF(Utils.toArray(u.beef, 'hex')), sourceOutputIndex: u.vout, unlockingScriptTemplate: unlock })
@@ -172,7 +189,19 @@ export function createAllowances(d: AllowanceDeps) {
     }
     if (!tx) throw new AllowanceEmpty(sum(utxos), missing)
     await tx.fee(feeModel)
-    await tx.sign() // agent AND policy sign every allowance input
+
+    // The agent co-signs: one signature per input, each checked against the registered agentPub
+    const description = describeTx(tx)
+    const hashes = description.inputs.map((_, i) => sighashFor(description, i))
+    const topup: TopupInfo = { satoshis: missing, derivationPrefix, derivationSuffix, senderIdentityKey: policyIdentity }
+    const sigs = await cosign(description, hashes.map(h => Utils.toHex(h)), topup)
+    if (!Array.isArray(sigs) || sigs.length !== hashes.length) throw new Error('The agent did not sign every input of the top-up')
+    hashes.forEach((h, i) => {
+      const der = /^[0-9a-f]{16,200}$/.test(String(sigs[i])) ? Utils.toArray(sigs[i], 'hex') : []
+      if (!verifyHashSignature(a.keys.agentPub, h, der)) throw new Error(`Invalid agent signature for input ${i} of the top-up`)
+      agentSigs.set(Utils.toHex(h), der)
+    })
+    await tx.sign() // agent (checked above) AND policy signatures on every allowance input
     const r = await tx.broadcast(await d.broadcaster())
     if (r.status !== 'success' && !/already|known/i.test(JSON.stringify(r))) throw new Error(`Allowance top-up rejected by the network: ${JSON.stringify(r).slice(0, 200)}`)
 
@@ -186,13 +215,12 @@ export function createAllowances(d: AllowanceDeps) {
     store.put({ ...a, utxos: left })
     await d.record({ agentId, url: forUrl, amountSats: missing, amountEur: eur(missing), decision: 'admin', action: 'allowance_topup', txid, reason: `Allowance top-up: ${missing} sats to the agent wallet (${sum(left)} sats left)` })
 
-    // The agent wallet receives the top-up (spendable at once)
-    await acceptBrc29Payment(agentWallet, { tx: atomic, txid, outputIndex: 0, satoshis: missing, derivationPrefix, derivationSuffix, senderIdentityKey: policyIdentity }, undefined, 'Allowance top-up')
-    return txid
+    // The agent wallet receives it on the agent's side (spendable at once)
+    return { tx: Array.from(atomic), txid, outputIndex: 0, satoshis: missing, derivationPrefix, derivationSuffix, senderIdentityKey: policyIdentity }
   })
 
   // ---- Reclaim by the company: the transaction must spend every UTXO of the allowance ----
-  const reclaimed = (agentId: string, beef: number[], by?: string) => d.lock.run(async () => {
+  const reclaimed = (agentId: string, beef: number[], by?: string) => d.lock.for(agentId).run(async () => {
     const a = store.get(agentId)
     if (!a || a.status !== 'open') throw new Error('No open allowance for this agent')
     if (!Array.isArray(beef) || !beef.length) throw new Error('beef must be an AtomicBEEF byte array')
@@ -208,6 +236,6 @@ export function createAllowances(d: AllowanceDeps) {
     return view(agentId)
   })
 
-  return { keys, balance, view, fund, ensureFunds, reclaimed, agentWallet: (agentId: string) => d.agents.get(agentId).wallet() }
+  return { keys, balance, view, fund, ensureFunds, reclaimed }
 }
 export type Allowances = ReturnType<typeof createAllowances>

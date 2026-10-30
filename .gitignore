@@ -1,7 +1,9 @@
 .env
 node_modules/
 data/
+mcp-data/
 .DS_Store
 workspace/
 config/viewers.json
 docker-data/
+mcp-data/

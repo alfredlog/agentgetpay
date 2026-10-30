@@ -2,7 +2,13 @@
 // Copilot, Cursor, Gemini CLI, home-made agents…) can buy services through the proxy.
 //
 // The AI NEVER holds a wallet key: it goes through the proxy, which applies the rules,
-// asks for human approval when needed, pays, and records everything in the audit log.
+// asks for human approval when needed, and records everything in the audit log.
+//
+// The agent's wallet lives HERE, not in the proxy (src/allowance/agent-signer.ts): one wallet-toolbox wallet
+// per agent in MCP_DATA_DIR (default mcp-data/). During a purchase the proxy answers with steps that this
+// server completes with that wallet (co-sign the allowance top-up, build the BRC-121 payment, internalize
+// refunds): src/agent/proxy-client.ts. So the proxy alone cannot spend an agent's allowance. On start (stdio)
+// or on an agent's first call (http), the server registers the agent's public keys with the proxy.
 //
 // Deux modes :
 //   MCP_TRANSPORT=stdio (default) → the app starts this program on the computer.
@@ -26,6 +32,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { FileLinks } from './file-links.js'
+import { createProxyClient, type ProxyClient } from '../agent/proxy-client.js'
+import { LocalAgentWallets } from '../allowance/agent-signer.js'
 
 const PROXY = (process.env.AGENTGETPAY_URL ?? 'http://127.0.0.1:5050').replace(/\/$/, '')
 const WORKSPACE = resolve(process.env.MCP_WORKSPACE ?? 'workspace')
@@ -95,12 +103,22 @@ async function extractFiles(ws: string, value: unknown, hint = 'result'): Promis
 // ---------------------------------------------------------------------------
 // Appels au proxy
 // ---------------------------------------------------------------------------
-async function proxy(apiKey: string, path: string, body?: unknown) {
-  const res = await fetch(`${PROXY}${path}`, {
-    method: body === undefined ? 'GET' : 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
-    body: body === undefined ? undefined : JSON.stringify(body)
-  }).catch(() => { throw new Error(`AgentGetPay proxy unreachable at ${PROXY}`) })
+// One client (and one wallet) per agent: it completes the payment steps the proxy asks for
+const wallets = new LocalAgentWallets()
+const clients = new Map<string, ProxyClient>()
+function clientFor(apiKey: string): ProxyClient {
+  let c = clients.get(apiKey)
+  if (!c) {
+    if (clients.size > 1000) clients.clear()
+    c = createProxyClient({ proxy: PROXY, apiKey, wallets })
+    clients.set(apiKey, c)
+  }
+  return c
+}
+
+async function proxy(apiKey: string, path: string, body?: Record<string, unknown>) {
+  const res = await clientFor(apiKey).call(path, body === undefined ? 'GET' : 'POST', body)
+    .catch(e => { throw new Error(/fetch failed/.test((e as Error).message) ? `AgentGetPay proxy unreachable at ${PROXY}` : (e as Error).message) })
   const text = await res.text()
   let json: any
   try { json = JSON.parse(text) } catch { json = undefined }
@@ -254,6 +272,12 @@ function buildServer(apiKey: string, ctx: Ctx = { ws: WORKSPACE }) {
     if (q.status === 'pending') return result(pendingText(q), q)
     if (q.status === 'rejected') return result(`${q.id} was rejected by ${q.decidedBy}. Do not buy it another way; tell the user.`, q)
     if (q.status === 'expired') return result(`${q.id} expired: nobody approved it in time. Ask the user before trying again.`, q)
+    if (q.status === 'approved' && q.kind === 'payment') {
+      // Approved: this server completes the purchase now with the agent's wallet (the proxy cannot pay alone)
+      const out = await proxy(apiKey, `/v1/requests/${request_id}/execute`, {})
+      if (!out.ok) return result(`${q.id} was approved by ${q.decidedBy}, but not completed: ${out.json?.reason ?? out.json?.error ?? out.status}`, { status: out.status, ...out.json }, true)
+      return present(out, `${q.id} was approved by ${q.decidedBy} and executed. `)
+    }
     if (q.status === 'approved') return result(`${q.id} was approved by ${q.decidedBy} and is being executed. Check again in a moment.`, q)
     if (q.kind === 'card') {
       if (q.status !== 'completed') return result(`${q.id} was approved but no card was issued: ${q.result?.error}`, q, true)
@@ -439,6 +463,8 @@ if ((process.env.MCP_TRANSPORT ?? 'stdio') === 'http') {
     // Each agent has its own folder: an assistant never sees another agent's files
     const ws = join(WORKSPACE, agentId)
     await mkdir(ws, { recursive: true })
+    // The agent's keys must be known to the proxy before the company can fund its allowance
+    void clientFor(t).register().catch(e => log(`Key registration for ${agentId} failed:`, (e as Error).message))
     const server = buildServer(t, { ws, agentId, links })
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
@@ -458,11 +484,15 @@ if ((process.env.MCP_TRANSPORT ?? 'stdio') === 'http') {
 
   app.listen(PORT, HOST, () => log(`AgentGetPay MCP server on http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}/mcp (proxy: ${PROXY}, workspace: ${WORKSPACE})`))
 } else {
+  // stdout is the protocol channel: anything a library prints (wallet-toolbox) goes to stderr instead
+  console.log = console.info = (...a: unknown[]) => console.error(...a)
   const key = process.env.AGENTGETPAY_API_KEY
   if (!key) {
     log('AGENTGETPAY_API_KEY is missing: set it to the API key of the agent this assistant acts as.')
     process.exit(1)
   }
+  // Registers the agent's wallet keys with the proxy (once; the key file stays in MCP_DATA_DIR)
+  await clientFor(key).register().catch(e => log('Key registration failed (the proxy may be down; retried on the first purchase):', (e as Error).message))
   await buildServer(key).connect(new StdioServerTransport())
   log(`AgentGetPay MCP server ready (stdio, proxy: ${PROXY}, workspace: ${WORKSPACE})`)
 }

@@ -9,6 +9,7 @@ import { PrivateKey } from '../shared/bsv.js'
 import { prepareMockChain } from './helpers/mockchain.js'
 import { childEnv } from './helpers/env.js'
 import { fundTestAllowance } from './helpers/company.js'
+import { agentFetch, registerTestAgent } from './helpers/agent.js'
 
 const PROXY_PORT = 5650, MARKET_PORT = 5680
 const PROXY = `http://127.0.0.1:${PROXY_PORT}`, MARKET = `http://localhost:${MARKET_PORT}`
@@ -38,9 +39,7 @@ const adminCall = (path: string, method = 'GET', body?: unknown) => fetch(`${PRO
   method, headers: { 'X-Admin-Token': ADMIN, 'X-Admin-Name': 'Alfred', 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined
 }).then(async r => ({ status: r.status, json: await r.json().catch(() => ({})) as any }))
 let key = ''
-const agent = (path: string, method = 'GET', body?: unknown) => fetch(`${PROXY}${path}`, {
-  method, headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined
-}).then(async r => ({ status: r.status, json: await r.json().catch(() => ({})) as any }))
+const agent = (path: string, method = 'GET', body?: unknown) => agentFetch(PROXY, key, path, method, body).then(async r => ({ status: r.status, json: await r.json().catch(() => ({})) as any }))
 const cardOf = (c: any) => ({ number: c.number, cvc: c.cvc, expMonth: c.expMonth, expYear: c.expYear })
 const shop = (path: string, body: unknown) => agent('/v1/fetch', 'POST', { url: `${MARKET}${path}`, method: 'POST', body, purpose: 'Card test' })
 const spent = async () => (await agent('/v1/me')).json.spentEur as number
@@ -55,6 +54,7 @@ try {
     shipping_addresses: [company],
     payment_methods: ['bsv', 'card'], card_only_if_no_bsv: false // the demo market accepts both: allow cards there
   } })).json.apiKey
+  await registerTestAgent(PROXY, key) // the agent's MCP server registers its keys on first start
   await fundTestAllowance(PROXY, ADMIN, 'einkauf-01') // the company funds the agent's allowance (BSV Desktop stand-in)
 
   // 1. A small card, within policy: issued at once
@@ -136,6 +136,7 @@ try {
       daily_budget_eur: 300, max_per_payment_eur: 200, approval_above_eur: 150, allowed_domains: 'localhost',
       categories: { 'travel.hotel': { max_unit_price_eur: 150 }, 'office.supplies': { max_unit_price_eur: 50 } }, shipping_addresses: [company], ...extra
     } })).json.apiKey
+    await registerTestAgent(PROXY, k)
     await fundTestAllowance(PROXY, ADMIN, id, 200_000)
     return k
   }
