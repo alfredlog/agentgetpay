@@ -22,6 +22,7 @@ export interface PayFetchOptions {
   wallet: WalletInterface // the payer's wallet-toolbox wallet
   maxSats?: number        // simple safeguard
   beforePay?: (offer: Offer) => Promise<boolean>
+  beforeSpend?: (offer: Offer) => Promise<void> // inside spendLock, right before the payment (e.g. allowance top-up)
   spendLock?: Mutex       // only one payment at a time spends the wallet
 }
 
@@ -101,6 +102,7 @@ export async function payFetch(url: string, init: RequestInit, opts: PayFetchOpt
   }
 
   const spend = async (): Promise<PayFetchResult> => {
+    await opts.beforeSpend?.({ url, amount, server, order: quote?.order, description: quote?.description })
     // 3. BRC-121 payment: output 0 is a BRC-29 payment to the merchant's identity key
     const payment = await constructPaymentHeaders(withHostOriginator(opts.wallet), url, amount, server)
     const txid = Beef.fromBinary(Utils.toArray(payment[BRC121.BEEF], 'base64')).atomicTxid // computed here, not taken from the merchant

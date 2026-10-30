@@ -130,6 +130,7 @@
   </div>
 </main>
 
+<script src="/allowance.js"></script><!-- BSV Desktop: fund and reclaim allowances (npm run build:web) -->
 <script>
 const $ = id => document.getElementById(id)
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
@@ -260,6 +261,15 @@ function card(a) {
       <span class="pill ${a.active ? 'ok' : 'bad'}">${a.active ? 'Active' : 'Suspended'}</span></div>
     <div class="meta">${eur(a.spentEur)} spent today · ${eur(a.spentMonthEur || 0)} this month${a.keyHint ? ` · API key …${esc(a.keyHint)}` : ''}</div>
     <div class="bar ${pct >= 100 ? 'full' : ''}"><div style="width:${pct}%"></div></div>
+    <div class="pay">
+      <div class="sub" style="margin-top:0">Allowance <span class="hint">(company money on chain: the agent and the proxy spend it together, only the company can take it back)</span></div>
+      <div class="meta" data-allow-bal>${a.allowanceSats ? `${a.allowanceSats.toLocaleString()} sats (${eur(a.allowanceEur)})` : 'Empty: this agent cannot pay in BSV until you fund it'}</div>
+      <div class="row"><label>Amount (sats)<input data-allow-sats type="number" min="1000" step="1" placeholder="100000"></label></div>
+      <div class="actions" style="margin-top:6px">
+        <button data-a="fund">Fund from BSV Desktop</button>
+        <button data-a="reclaim" ${a.allowanceSats ? '' : 'disabled'}>Reclaim to BSV Desktop</button>
+      </div>
+    </div>
     <div class="row">
       <label>Daily budget €<input data-f="daily_budget_eur" type="number" step="0.01" min="0.01" value="${r.daily_budget_eur}"></label>
       <label>Max per payment €<input data-f="max_per_payment_eur" type="number" step="0.01" min="0.01" value="${r.max_per_payment_eur}"></label>
@@ -335,6 +345,21 @@ function wire(a) {
   c.querySelector('[data-a="add-cat"]').onclick = () => c.querySelector('[data-cats]').insertAdjacentHTML('beforeend', catRow())
   c.querySelector('[data-a="add-addr"]').onclick = () => c.querySelector('[data-addrs]').insertAdjacentHTML('beforeend', addrRow())
   c.querySelector('details.rules').onclick = e => { if (e.target.matches('[data-remove]')) { e.target.parentElement.remove(); msg('') } }
+  // Allowance: BSV Desktop creates (fund) or signs (reclaim) the transaction; the proxy checks and records it
+  const walletCode = () => { if (!window.agpAllowance) throw new Error('Wallet code not loaded: run npm run build:web'); return window.agpAllowance }
+  c.querySelector('[data-a="fund"]').onclick = e => run(e.target, async () => {
+    const sats = Number(c.querySelector('[data-allow-sats]').value)
+    if (!Number.isInteger(sats) || sats < 1000) throw new Error('Enter at least 1000 sats')
+    msg('Confirm the payment in BSV Desktop…')
+    const v = await walletCode().fund(api, a.id, sats)
+    await load(); $('c-' + a.id).querySelector('[data-msg]').textContent = `Allowance funded: ${v.balanceSats.toLocaleString()} sats`
+  })
+  c.querySelector('[data-a="reclaim"]').onclick = e => run(e.target, async () => {
+    if (!confirm(`Take the whole allowance of ${a.id} back into BSV Desktop? The agent can no longer pay in BSV.`)) return
+    msg('Confirm in BSV Desktop…')
+    await walletCode().reclaim(api, a.id)
+    await load(); $('c-' + a.id).querySelector('[data-msg]').textContent = 'Allowance reclaimed into BSV Desktop'
+  })
   c.querySelector('[data-a="reset"]').onclick = e => run(e.target, async () => {
     await api(`/agents/${a.id}/reset-budget`, 'POST'); await load(); $('c-' + a.id).querySelector('[data-msg]').textContent = 'Spending reset to €0.00'
   })

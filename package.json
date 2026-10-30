@@ -32,7 +32,9 @@
     "test:market": "tsx src/test/market-flow.ts",
     "test:approval": "tsx src/test/approval-flow.ts",
     "test:card": "tsx src/test/card-flow.ts",
-    "test:bsv": "tsx src/test/bsv-flow.ts"
+    "test:bsv": "tsx src/test/bsv-flow.ts",
+    "test:allowance": "tsx src/test/allowance-flow.ts",
+    "build:web": "node scripts/build-web.mjs"
   },
   "dependencies": {
     "@bsv/402-pay": "0.3.3",

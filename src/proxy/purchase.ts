@@ -8,14 +8,16 @@
 // for the agent, and notifies it on its callback address if it gave one.
 //
 // Payment: BRC-121 (@bsv/402-pay). The order details come from the merchant's free quote, so the policy
-// runs BEFORE anything is signed; then the payer wallet (wallet-toolbox) builds the payment.
+// runs BEFORE anything is signed. Then, just in time, the agent's allowance tops up the agent's wallet
+// (allowances.ts) and the agent's wallet (wallet-toolbox) builds the payment.
 //
 // Refunds: a merchant can send the money back (cancellation). Its answer carries a BRC-29 payment to the
-// payer's identity key in a "refund" field; the proxy checks that it refunds one of this agent's payments,
-// verifies and internalizes it in the payer wallet, and records it in the audit log (the budget is given back).
+// agent wallet's identity key in a "refund" field; the proxy checks that it refunds one of this agent's payments,
+// verifies and internalizes it in the agent's wallet, and records it in the audit log (the budget is given back).
 import { Transaction, type WalletInterface } from '../shared/bsv.js'
 import { payFetch, fetchQuote, readChallenge, PaidNotDelivered } from '../agent/pay-fetch.js'
 import { acceptBrc29Payment, isBrc29Payment } from '../shared/payments.js'
+import { AllowanceEmpty } from '../allowance/allowances.js'
 import type { Mutex } from '../shared/mutex.js'
 import type { OrderInfo, Quote } from '../shared/order.js'
 import type { JsonPolicyEngine } from './policy.js'
@@ -33,8 +35,10 @@ export interface PurchaseDeps {
   eurPerSat: number
   policy: JsonPolicyEngine
   budget: MemoryBudgetStore
-  payer: () => Promise<WalletInterface> // the wallet that pays (a server wallet on this branch)
-  payerLock: Mutex                      // one payment at a time
+  agentWallet: (agentId: string) => Promise<WalletInterface> // pays (BRC-121) and receives refunds
+  // Tops the agent's wallet up from its allowance; throws AllowanceEmpty if the allowance is too small
+  ensureFunds: (agentId: string, sats: number, url: string) => Promise<unknown>
+  payerLock: Mutex // one payment at a time
   ledger: Ledger
   record: (e: Parameters<Ledger['record']>[0]) => Promise<unknown>
   requests: RequestStore
@@ -130,7 +134,7 @@ export function createPurchaseEngine(d: PurchaseDeps) {
       if (already + p.satoshis > orig.amountSats) throw new Error('refund larger than the payment')
       // Checks that the output is ours and worth what is claimed, then internalizes it (the wallet verifies
       // SPV and broadcasts it if needed): a refund that is not in our wallet is worth nothing
-      await acceptBrc29Payment(await d.payer(), p, undefined, `Refund of ${p.paymentTxid.slice(0, 16)}`)
+      await acceptBrc29Payment(await d.agentWallet(agentId), p, undefined, `Refund of ${p.paymentTxid.slice(0, 16)}`)
       const sats = p.satoshis
       await d.record({
         agentId, url, amountSats: sats, amountEur: eur(sats), purpose: orig.purpose, decision: 'refund',
@@ -168,8 +172,15 @@ export function createPurchaseEngine(d: PurchaseDeps) {
         headers: a.body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
         redirect: 'manual' // never follow a redirect: it could lead outside the allowed domains
       }, {
-        wallet: await d.payer(),
+        wallet: await d.agentWallet(a.agentId),
         spendLock: d.payerLock,
+        // Allowed (policy, approval, budget): only now is the allowance spent, inside the payment lock
+        beforeSpend: async () => {
+          try { await d.ensureFunds(a.agentId, amountSats, a.url) } catch (e) {
+            if (e instanceof AllowanceEmpty) decision = { kind: 'deny', reason: e.message }
+            throw e
+          }
+        },
         beforePay: async offer => {
           amountSats = offer.amount
           order = offer.order

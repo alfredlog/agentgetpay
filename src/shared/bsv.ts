@@ -14,7 +14,7 @@ const require = createRequire(import.meta.url)
 const sdk: typeof SDK = require('@bsv/sdk')
 
 // Values (classes, namespaces) used by the project. Add a name here when you need it.
-export const { PrivateKey, PublicKey, Transaction, Beef, P2PKH, LockingScript, Script, MerklePath, CachedKeyDeriver, Random, Utils, Hash } = sdk
+export const { PrivateKey, PublicKey, Transaction, Beef, P2PKH, LockingScript, UnlockingScript, Script, MerklePath, CachedKeyDeriver, Random, Utils, Hash, OP, Signature, TransactionSignature, SatoshisPerKilobyte } = sdk
 
 // Classes are also types: re-export their instance types under the same names.
 export type PrivateKey = SDK.PrivateKey
@@ -26,6 +26,9 @@ export type PublicKey = SDK.PublicKey
 export type Beef = SDK.Beef
 export type Script = SDK.Script
 export type CachedKeyDeriver = SDK.CachedKeyDeriver
+export type UnlockingScript = SDK.UnlockingScript
+export type ScriptTemplate = SDK.ScriptTemplate
+export type ScriptTemplateUnlock = SDK.ScriptTemplateUnlock
 export type Broadcaster = SDK.Broadcaster
 export type BroadcastResponse = SDK.BroadcastResponse
 export type BroadcastFailure = SDK.BroadcastFailure
