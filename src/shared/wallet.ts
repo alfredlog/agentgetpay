@@ -1,5 +1,5 @@
 // Server wallets (wallet-toolbox, guide §14): the merchants' wallets (they receive BRC-121
-// payments and send refunds) and, on this branch, the proxy's payer wallet.
+// payments and send refunds), the proxy's policy wallet and the agents' wallets (src/allowance).
 //
 // Broadcasting: Arcade first (guide §14.2), then wallet-toolbox's default providers.
 // The root key comes from an environment variable; it is never printed or written to logs.
@@ -11,8 +11,8 @@ import { createRequire } from 'node:module'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type * as Toolbox from '@bsv/wallet-toolbox' with { 'resolution-mode': 'require' }
-import { CachedKeyDeriver, PrivateKey, type WalletInterface } from './bsv.js'
-import { arcadeUrl } from './arcade.js'
+import { CachedKeyDeriver, PrivateKey, type Broadcaster, type ChainTracker, type WalletInterface } from './bsv.js'
+import { arcadeUrl, ArcadeBroadcaster, ArcadeChainTracker } from './arcade.js'
 import { bsvNetwork } from './network.js'
 
 const require = createRequire(import.meta.url)
@@ -59,4 +59,16 @@ export async function openServerWallet (o: ServerWalletOptions): Promise<WalletI
 export async function spendableSats (w: WalletInterface): Promise<number> {
   const { outputs } = await w.listOutputs({ basket: 'default', limit: 10000 })
   return outputs.filter(x => x.spendable).reduce((s, x) => s + x.satoshis, 0)
+}
+
+// SPV header source: Arcade's chaintracks (guide §20.3), or the mock chain in offline tests
+export async function openChainTracker (): Promise<ChainTracker> {
+  if (process.env.MOCK_CHAIN_DB) return (await (await import('../test/helpers/mockchain.js')).openMockChain(process.env.MOCK_CHAIN_DB)).chainTracker
+  return new ArcadeChainTracker()
+}
+
+// Broadcaster for transactions the proxy builds itself (allowance top-ups): Arcade with Extended Format
+export async function openBroadcaster (): Promise<Broadcaster> {
+  if (process.env.MOCK_CHAIN_DB) return (await (await import('../test/helpers/mockchain.js')).openMockChain(process.env.MOCK_CHAIN_DB)).broadcaster
+  return new ArcadeBroadcaster()
 }

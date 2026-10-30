@@ -9,6 +9,7 @@ import http from 'node:http'
 import { PrivateKey } from '../shared/bsv.js'
 import { prepareMockChain } from './helpers/mockchain.js'
 import { childEnv } from './helpers/env.js'
+import { fundTestAllowance } from './helpers/company.js'
 
 const PROXY_PORT = 5550, MARKET_PORT = 5580, HOOK_PORT = 5590
 const PROXY = `http://127.0.0.1:${PROXY_PORT}`, MARKET = `http://localhost:${MARKET_PORT}`
@@ -63,6 +64,7 @@ try {
     categories: { 'travel.hotel': { max_unit_price_eur: 150 }, 'office.supplies': { max_unit_price_eur: 50 }, software: { approval_above_eur: 0 } },
     shipping_addresses: [company]
   } })).json.apiKey
+  await fundTestAllowance(PROXY, ADMIN, 'einkauf-01') // the company funds the agent's allowance (BSV Desktop stand-in)
 
   // 1. An approval that takes time: the agent does not wait
   const t0 = Date.now()

@@ -8,6 +8,7 @@ import { createRequire } from 'node:module'
 import { PrivateKey } from '../shared/bsv.js'
 import { prepareMockChain } from './helpers/mockchain.js'
 import { childEnv } from './helpers/env.js'
+import { fundTestAllowance } from './helpers/company.js'
 
 const PROXY_PORT = 5450, MARKET_PORT = 5480
 const PROXY = `http://127.0.0.1:${PROXY_PORT}`, MARKET = `http://localhost:${MARKET_PORT}`
@@ -52,6 +53,7 @@ try {
     } })
   }).then(r => r.json()) as any
   key = created.apiKey
+  await fundTestAllowance(PROXY, ADMIN, 'einkauf-01') // the company funds the agent's allowance (BSV Desktop stand-in)
 
   const cat = await call('/api')
   check(cat.status === 200 && cat.paid === 0 && cat.json.shops?.length === 3, 'Catalog is free and lists 3 shops')

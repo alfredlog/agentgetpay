@@ -21,8 +21,10 @@ import { DatevExporter, loadAccountingConfig, monthlyStatementHtml } from './acc
 import { AgentRegistry, validateRules, validAgentId } from './registry.js'
 import { ViewerStore, validViewerName } from './viewers.js'
 import { OAuthServer } from './oauth.js'
-import type { Broadcaster, WalletInterface } from '../shared/bsv.js'
-import { openServerWallet } from '../shared/wallet.js'
+import type { Broadcaster } from '../shared/bsv.js'
+import { openServerWallet, openChainTracker, openBroadcaster } from '../shared/wallet.js'
+import { createAllowances } from '../allowance/allowances.js'
+import { LocalAgentSigners } from '../allowance/agent-signer.js'
 import { explorerTx, wocExplorer } from '../shared/network.js'
 
 
@@ -60,16 +62,17 @@ if (ADMIN_TOKEN.length < 12) {
   console.log(`Admin password created and saved in .env: ${ADMIN_TOKEN}`)
 }
 const keys = new EnvKeyStore(process.env.BSV_WIF!) // signs the audit-log anchors
-// The payer wallet (wallet-toolbox) pays the BRC-121 purchases and receives the refunds.
+// The policy wallet (wallet-toolbox) holds the proxy's half of every agent allowance: it co-signs
+// top-ups, never alone. The company's money stays in the allowances (src/allowance), not here.
 // On this branch it is a server wallet with its own root key; it is created once and never printed.
-let PAYER_ROOT_KEY = process.env.PAYER_ROOT_KEY ?? ''
-if (!/^[0-9a-f]{64}$/i.test(PAYER_ROOT_KEY)) {
-  PAYER_ROOT_KEY = randomBytes(32).toString('hex')
-  appendFileSync('.env', `\nPAYER_ROOT_KEY=${PAYER_ROOT_KEY}\n`)
-  process.env.PAYER_ROOT_KEY = PAYER_ROOT_KEY
-  console.log('Payer wallet key created and saved in .env')
+let POLICY_ROOT_KEY = process.env.POLICY_ROOT_KEY ?? ''
+if (!/^[0-9a-f]{64}$/i.test(POLICY_ROOT_KEY)) {
+  POLICY_ROOT_KEY = randomBytes(32).toString('hex')
+  appendFileSync('.env', `\nPOLICY_ROOT_KEY=${POLICY_ROOT_KEY}\n`)
+  process.env.POLICY_ROOT_KEY = POLICY_ROOT_KEY
+  console.log('Policy wallet key created and saved in .env')
 }
-export const openPayerWallet = () => openServerWallet({ rootKeyHex: PAYER_ROOT_KEY, filePath: process.env.PAYER_WALLET_FILE ?? 'data/payer-wallet.sqlite', databaseName: 'payer_wallet' })
+const openPolicyWallet = () => openServerWallet({ rootKeyHex: POLICY_ROOT_KEY, filePath: process.env.POLICY_WALLET_FILE ?? 'data/policy-wallet.sqlite', databaseName: 'policy_wallet' })
 const ledger = new JsonlLedger('data/ledger.jsonl')
 budget.restoreFrom(ledger.allSync()) // today's spending survives a restart
 const anchorLog = new AnchorLog('data/anchors.jsonl')
@@ -139,12 +142,12 @@ function checkTarget(url: unknown, allowed: string[] | undefined): string | unde
 
 export function createProxy(
   inner: UtxoProvider = new WhatsOnChainUtxoProvider(),
-  opts: { broadcaster?: Broadcaster; fetchTxHex?: FetchTxHex; payer?: Promise<WalletInterface> } = {}
+  opts: { broadcaster?: Broadcaster; fetchTxHex?: FetchTxHex } = {}
 ) {
   const utxos = new ChainedUtxoProvider(inner)
   const walletLock = new Mutex() // anchors spend the P2PKH wallet one at a time
-  const payerReady = opts.payer ?? openPayerWallet()
-  payerReady.catch(e => console.error('⚠ Payer wallet unavailable:', (e as Error).message))
+  const policyReady = openPolicyWallet()
+  policyReady.catch(e => console.error('⚠ Policy wallet unavailable:', (e as Error).message))
   const rail = new BsvAnchorRail(keys.address('company'), () => keys.unlocker('company'), utxos, walletLock, opts.broadcaster)
   const fetchTxHex = opts.fetchTxHex ?? cachedWocFetch
 
@@ -206,8 +209,14 @@ export function createProxy(
   }
 
   // The purchase engine: rules, mandates, approvals (even long ones), payment, refunds
+  // Agent allowances: funded and reclaimed by the company (admin page, BSV Desktop), spent just in time
+  const allowances = createAllowances({
+    policyWallet: () => policyReady, agents: new LocalAgentSigners(), chainTracker: openChainTracker, broadcaster: openBroadcaster,
+    lock: new Mutex(), eurPerSat: EUR_PER_SAT, record
+  })
+
   const engine = createPurchaseEngine({
-    eurPerSat: EUR_PER_SAT, policy, budget, payer: () => payerReady, payerLock: new Mutex(), ledger, record, requests, mandates,
+    eurPerSat: EUR_PER_SAT, policy, budget, agentWallet: id => allowances.agentWallet(id), ensureFunds: (id, sats, url) => allowances.ensureFunds(id, sats, url), payerLock: new Mutex(), ledger, record, requests, mandates,
     notifiers: [notifier],
     isActive: id => registry.isActive(id),
     checkTarget: (url, agentId) => checkTarget(url, registry.rulesFor(agentId)?.allowed_domains),
@@ -474,7 +483,8 @@ export function createProxy(
         paymentMethods: r?.payment_methods?.length ? r.payment_methods : ['bsv'],
         maxPerPaymentEur: r?.max_per_payment_eur ?? 0,
         approvalAboveEur: r?.approval_above_eur ?? 0,
-        allowedDomains: r?.allowed_domains ?? []
+        allowedDomains: r?.allowed_domains ?? [],
+        allowanceSats: allowances.balance(a.id), allowanceEur: allowances.balance(a.id) * EUR_PER_SAT
       }
     }))
     res.json({ agents: list, pending: requests.open().map(requestView), eurPerSat: EUR_PER_SAT, anchors: anchorLog.all() })
@@ -526,9 +536,26 @@ export function createProxy(
     res.json(await Promise.all(registry.list().map(async a => ({
       id: a.id, active: a.active, keyHint: a.keyHint ?? (a.apiKey ? a.apiKey.slice(-4) : undefined),
       rules: registry.rulesFor(a.id), spentEur: (await budget.spentToday(a.id)) * EUR_PER_SAT,
-      spentMonthEur: (await budget.spentThisMonth(a.id)) * EUR_PER_SAT
+      spentMonthEur: (await budget.spentThisMonth(a.id)) * EUR_PER_SAT,
+      allowanceSats: allowances.balance(a.id), allowanceEur: allowances.balance(a.id) * EUR_PER_SAT
     }))))
   })
+
+  // ---- Agent allowances (the admin page funds and reclaims them with the company's BSV Desktop) ----
+  const knownAgent = (req: express.Request, res: express.Response) => {
+    const id = req.params.id
+    if (!registry.get(id)) { res.status(404).json({ error: 'Unknown agent' }); return undefined }
+    return id
+  }
+  const allowanceCall = (fn: (id: string, req: express.Request) => Promise<unknown> | unknown): express.RequestHandler => async (req, res) => {
+    const id = knownAgent(req, res)
+    if (!id) return
+    try { res.json(await fn(id, req)) } catch (e) { res.status(400).json({ error: (e as Error).message }) }
+  }
+  admin.get('/allowances/:id/keys', allowanceCall(id => allowances.keys(id)))  // agentPub, policyPub, company key reference
+  admin.get('/allowances/:id', allowanceCall(id => allowances.view(id)))       // UTXOs and their BEEF (for the reclaim)
+  admin.post('/allowances/:id/fund', allowanceCall((id, req) => allowances.fund(id, req.body ?? {}, who(req))))
+  admin.post('/allowances/:id/reclaim', allowanceCall((id, req) => allowances.reclaimed(id, req.body?.beef, who(req))))
 
   admin.put('/agents/:id', async (req, res) => {
     const id = req.params.id

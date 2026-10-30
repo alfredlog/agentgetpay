@@ -20,7 +20,7 @@
 import { createRequire } from 'node:module'
 import type * as Toolbox from '@bsv/wallet-toolbox' with { 'resolution-mode': 'require' }
 import type { Knex } from 'knex'
-import { Beef, CachedKeyDeriver, MerklePath, PrivateKey, Script, Transaction, type ChainTracker, type WalletInterface } from '../../shared/bsv.js'
+import { Beef, CachedKeyDeriver, MerklePath, PrivateKey, Script, Transaction, type Broadcaster, type ChainTracker, type WalletInterface } from '../../shared/bsv.js'
 
 const require = createRequire(import.meta.url)
 const { MockServices, ScriptTemplateBRC29, StorageKnex, Wallet, WalletStorageManager, randomBytesBase64 }: typeof Toolbox = require('@bsv/wallet-toolbox')
@@ -45,6 +45,7 @@ export const sqliteKnex = (filename: string): Knex => makeKnex({
 export interface MockChain {
   services: MockServicesT
   chainTracker: ChainTracker
+  broadcaster: Broadcaster // posts a transaction (with its BEEF ancestry) to the mock chain
   makeWallet: (rootKey?: PrivateKey, storageFile?: string) => Promise<WalletT>
   fund: (wallet: WalletInterface, satoshis?: number) => Promise<void>
   mineBlock: () => Promise<void>
@@ -150,9 +151,20 @@ async function createMockChain (filename: string): Promise<MockChain> {
     })
   }
 
+  const broadcaster: Broadcaster = {
+    broadcast: async (tx: Transaction) => {
+      const txid = tx.id('hex')
+      const [r] = await anyServices.postBeef(Beef.fromBinary(tx.toBEEF()), [txid])
+      return r?.status === 'success'
+        ? { status: 'success', txid, message: 'mock chain' }
+        : { status: 'error', code: 'MOCK', txid, description: String(r?.error?.message ?? 'rejected by the mock chain') }
+    }
+  }
+
   return {
     services,
     chainTracker: await services.getChainTracker() as unknown as ChainTracker,
+    broadcaster,
     makeWallet,
     fund,
     mineBlock: async () => { await services.mineBlock() },
