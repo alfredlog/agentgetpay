@@ -9,6 +9,7 @@ import http from 'node:http'
 import { PrivateKey, Beef, Utils } from '../shared/bsv.js'
 import { prepareMockChain } from './helpers/mockchain.js'
 import { childEnv } from './helpers/env.js'
+import { fundTestAllowance } from './helpers/company.js'
 
 const PROXY_PORT = 5350, SELLER_PORT = 5390
 const PROXY = `http://127.0.0.1:${PROXY_PORT}`, SHOP = `http://localhost:${SELLER_PORT}`
@@ -68,6 +69,7 @@ try {
   await waitUp()
   const created = await admin('/agents', 'POST', { id: 'einkauf-test', rules })
   key = created.apiKey
+  await fundTestAllowance(PROXY, ADMIN, 'einkauf-test') // the company funds the agent's allowance (BSV Desktop stand-in)
   check(!!key, 'Purchasing agent created with categories, monthly budget and a delivery address')
   const bad = await admin('/agents/einkauf-test', 'PUT', { rules: { ...rules, monthly_budget_eur: 100 } })
   check(/monthly budget cannot be lower/i.test(bad.error ?? ''), 'Admin cannot set a monthly budget below the daily budget')
@@ -121,7 +123,7 @@ try {
   }).then(async r => ({ status: r.status, json: await r.json().catch(() => ({})) as any }))
   check(nd.status === 502 && /did not deliver/.test(nd.json.reason ?? ''), `Fresh 402 after payment: the agent is told it paid but got nothing (${nd.status})`)
   const ndLedger = await fetch(`${PROXY}/v1/ledger`).then(x => x.json()) as any[]
-  const ndEntry = ndLedger.find(e => e.url?.includes(`:${BROKEN_PORT}/`))
+  const ndEntry = ndLedger.find(e => e.url?.includes(`:${BROKEN_PORT}/`) && e.action !== 'allowance_topup') // the top-up has its own entry
   check(ndEntry?.decision === 'allow' && ndEntry.amountSats === 500 && ndEntry.reason === 'paid, merchant did not deliver' && brokenSeen.length === 1 && ndEntry.txid === brokenSeen[0],
     'The payment is booked as allow with the txid the merchant received')
   check(!ndLedger.some(e => e.url?.includes(`:${BROKEN_PORT}/`) && e.decision === 'error'), 'No error entry without txid')
