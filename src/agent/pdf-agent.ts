@@ -1,14 +1,17 @@
 // Demo: agent "docs-01" uses PDF Libre as a paid service, through the proxy.
-// It has no key: it sends its PDFs to the proxy, which applies the rules and pays PDF Libre.
+// The proxy applies the rules; the agent's own wallet (mcp-data/) co-signs and pays what it allowed.
 //
 // Usage: npm run agent:pdf                         → with two generated sample PDFs
 //         npm run agent:pdf -- invoice.pdf contract.pdf → with your own files
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { basename } from 'node:path'
+import 'dotenv/config'
+import { createProxyClient } from './proxy-client.js'
 
 const PROXY = process.env.PROXY_URL ?? 'http://localhost:5050'
 const PDF_LIBRE = process.env.PDF_LIBRE_URL ?? 'http://localhost:3000'
 const API_KEY = 'dev-docs-01'
+const client = createProxyClient({ proxy: PROXY, apiKey: API_KEY })
 
 // ---- Small hand-written sample PDF (no library needed) ----
 function samplePdf(title: string, pages: number): Buffer {
@@ -36,11 +39,7 @@ function samplePdf(title: string, pages: number): Buffer {
 
 // ---- Calling a service through the proxy ----
 async function call(path: string, body: object | undefined, purpose: string) {
-  const res = await fetch(`${PROXY}/v1/fetch`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${API_KEY}` },
-    body: JSON.stringify({ url: `${PDF_LIBRE}${path}`, method: body ? 'POST' : 'GET', body, purpose })
-  })
+  const res = await client.call('/v1/fetch', 'POST', { url: `${PDF_LIBRE}${path}`, method: body ? 'POST' : 'GET', body, purpose })
   const data = await res.json() as any
   const paid = Number(res.headers.get('X-Paid-Sats') ?? 0)
   return { ok: res.ok, status: res.status, paid, data }
@@ -76,3 +75,4 @@ console.log(m.ok
 const broken = Buffer.from('%PDF-1.4\nthis file is damaged')
 const b = await call('/agent/v1/compress', { pdf: broken.toString('base64'), filename: 'damaged.pdf' }, 'Compress a damaged file')
 console.log(b.ok ? `? damaged file was accepted` : `✘ damaged   ${b.data.reason ?? b.data.error}`)
+process.exit(0) // the wallet monitor would keep the process alive

@@ -5,8 +5,12 @@
 //   2. free quote (QUOTE_PATH) → order details: merchant, category, items, delivery
 //   3. beforePay(offer) → the purchase policy decides
 //   4. constructPaymentHeaders (BRC-29 payment to the merchant) → same request again, paid
-import { Beef, Utils, type WalletInterface } from '../shared/bsv.js'
-import { BRC121, constructPaymentHeaders, withHostOriginator } from '../shared/brc121.js'
+//
+// The payment headers come from the payer's wallet (`wallet`), or from `pay` when the wallet is
+// elsewhere: the proxy asks the agent (its MCP server) to build them. Either way they are checked
+// before they are sent: output 0 must pay exactly the price.
+import { Transaction, Utils, type WalletInterface } from '../shared/bsv.js'
+import { BRC121, constructPaymentHeaders, withHostOriginator, type PaymentHeaders } from '../shared/brc121.js'
 import { QUOTE_PATH, type OrderInfo, type Quote } from '../shared/order.js'
 import type { Mutex } from '../shared/mutex.js'
 
@@ -19,7 +23,8 @@ export interface Offer {
 }
 
 export interface PayFetchOptions {
-  wallet: WalletInterface // the payer's wallet-toolbox wallet
+  wallet?: WalletInterface // the payer's wallet-toolbox wallet…
+  pay?: (offer: Offer) => Promise<PaymentHeaders> // …or whoever holds it builds the payment headers
   maxSats?: number        // simple safeguard
   beforePay?: (offer: Offer) => Promise<boolean>
   beforeSpend?: (offer: Offer) => Promise<void> // inside spendLock, right before the payment (e.g. allowance top-up)
@@ -79,6 +84,16 @@ export class PaidNotDelivered extends Error {
   }
 }
 
+// The txid of a BRC-121 payment, after checking that output 0 pays exactly `amount` sats
+export function checkPaymentHeaders(h: PaymentHeaders, amount: number): string {
+  if (!h || typeof h !== 'object' || h['x-bsv-vout'] !== '0') throw new Error('The payment must pay the merchant in output 0')
+  let tx: Transaction
+  try { tx = Transaction.fromAtomicBEEF(Utils.toArray(String(h[BRC121.BEEF]), 'base64')) } catch { throw new Error('The payment is not a valid AtomicBEEF transaction') }
+  if (tx.outputs[0]?.satoshis !== amount) throw new Error(`The payment pays ${tx.outputs[0]?.satoshis ?? 0} sats, not the approved ${amount} sats`)
+  for (const k of ['x-bsv-sender', 'x-bsv-nonce', 'x-bsv-time'] as const) if (typeof h[k] !== 'string' || !h[k] || h[k].length > 200) throw new Error(`The payment has no valid ${k} header`)
+  return tx.id('hex') // computed here, not taken from the merchant or the payer
+}
+
 const bodyText = (init: RequestInit) => typeof init.body === 'string' ? init.body : undefined
 
 export async function payFetch(url: string, init: RequestInit, opts: PayFetchOptions): Promise<PayFetchResult> {
@@ -102,18 +117,19 @@ export async function payFetch(url: string, init: RequestInit, opts: PayFetchOpt
   }
 
   const spend = async (): Promise<PayFetchResult> => {
-    await opts.beforeSpend?.({ url, amount, server, order: quote?.order, description: quote?.description })
+    const offer = { url, amount, server, order: quote?.order, description: quote?.description }
+    await opts.beforeSpend?.(offer)
     // 3. BRC-121 payment: output 0 is a BRC-29 payment to the merchant's identity key
-    const payment = await constructPaymentHeaders(withHostOriginator(opts.wallet), url, amount, server)
-    const txid = Beef.fromBinary(Utils.toArray(payment[BRC121.BEEF], 'base64')).atomicTxid // computed here, not taken from the merchant
-    if (!txid) throw new Error('The wallet returned a payment without a transaction id')
+    if (!opts.pay && !opts.wallet) throw new Error('payFetch needs a wallet or a pay function')
+    const payment = opts.pay ? await opts.pay(offer) : await constructPaymentHeaders(withHostOriginator(opts.wallet!), url, amount, server)
+    const txid = checkPaymentHeaders(payment, amount)
 
     // From here on the money is gone: createAction has already sent the payment. Any failure
     // below is reported WITH the txid, so the caller can book what the wallet really spent.
     const paid = { amount, txid }
     // 4. Same request again, with the payment
     const headers = new Headers(init.headers)
-    for (const [k, v] of Object.entries(payment)) headers.set(k, v)
+    for (const k of [BRC121.BEEF, 'x-bsv-sender', 'x-bsv-nonce', 'x-bsv-time', 'x-bsv-vout'] as const) headers.set(k, payment[k]) // only the BRC-121 headers
     let second: Response
     try { second = await fetch(url, { ...init, headers }) } catch (e) { throw new PaidNotDelivered(paid, (e as Error).message) }
     // A fresh 402 means the merchant did not accept the payment (invalid, expired or replayed)

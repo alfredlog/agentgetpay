@@ -4,21 +4,27 @@
 //
 // Long approval: if nobody has answered after a few seconds, the request is stored and the agent
 // immediately gets "pending (R-…)". It carries on with its work. When a human approves — an hour or three
-// days later — the proxy EXECUTES the purchase by itself (never above the approved amount), keeps the result
-// for the agent, and notifies it on its callback address if it gave one.
+// days later — the request becomes "approved" and the agent is notified on its callback address if it gave
+// one. The agent then completes the purchase (POST /v1/requests/:id/execute, MCP tool check_request):
+// never above the approved amount, with budgets and rules checked again. The proxy cannot pay alone.
 //
 // Payment: BRC-121 (@bsv/402-pay). The order details come from the merchant's free quote, so the policy
 // runs BEFORE anything is signed. Then, just in time, the agent's allowance tops up the agent's wallet
-// (allowances.ts) and the agent's wallet (wallet-toolbox) builds the payment.
+// (allowances.ts) and the agent's wallet builds the payment. That wallet lives on the AGENT's side (its MCP
+// server): the proxy asks for each signature through a step of the agent's own request (agent-steps.ts),
+// binds it to this purchase (url, amount) and checks what comes back.
 //
 // Refunds: a merchant can send the money back (cancellation). Its answer carries a BRC-29 payment to the
-// agent wallet's identity key in a "refund" field; the proxy checks that it refunds one of this agent's payments,
-// verifies and internalizes it in the agent's wallet, and records it in the audit log (the budget is given back).
-import { Transaction, type WalletInterface } from '../shared/bsv.js'
+// agent wallet's identity key in a "refund" field; the proxy checks that it refunds one of this agent's payments
+// and verifies it (SPV), the agent internalizes it in its wallet, and the proxy records it in the audit log
+// (the budget is given back).
+import { Transaction, type ChainTracker } from '../shared/bsv.js'
 import { payFetch, fetchQuote, readChallenge, PaidNotDelivered } from '../agent/pay-fetch.js'
-import { acceptBrc29Payment, isBrc29Payment } from '../shared/payments.js'
-import { AllowanceEmpty } from '../allowance/allowances.js'
-import type { Mutex } from '../shared/mutex.js'
+import { isBrc29Payment, type Brc29Payment } from '../shared/payments.js'
+import { AllowanceEmpty, type Cosign } from '../allowance/allowances.js'
+import type { KeyedMutex } from '../shared/mutex.js'
+import type { PaymentHeaders } from '../shared/brc121.js'
+import type { Ask } from './agent-steps.js'
 import type { OrderInfo, Quote } from '../shared/order.js'
 import type { JsonPolicyEngine } from './policy.js'
 import { fmt, methodsOf } from './policy.js'
@@ -35,10 +41,11 @@ export interface PurchaseDeps {
   eurPerSat: number
   policy: JsonPolicyEngine
   budget: MemoryBudgetStore
-  agentWallet: (agentId: string) => Promise<WalletInterface> // pays (BRC-121) and receives refunds
-  // Tops the agent's wallet up from its allowance; throws AllowanceEmpty if the allowance is too small
-  ensureFunds: (agentId: string, sats: number, url: string) => Promise<unknown>
-  payerLock: Mutex // one payment at a time
+  // Tops the agent's wallet up from its allowance (co-signed by the agent); throws AllowanceEmpty if the
+  // allowance is too small. Returns the BRC-29 top-up for the agent's wallet, if one was needed.
+  ensureFunds: (agentId: string, sats: number, url: string, walletSats: number, cosign: Cosign) => Promise<Brc29Payment | undefined>
+  chainTracker: () => Promise<ChainTracker> // SPV of the refunds
+  payerLock: KeyedMutex // one payment at a time per agent wallet
   ledger: Ledger
   record: (e: Parameters<Ledger['record']>[0]) => Promise<unknown>
   requests: RequestStore
@@ -61,7 +68,11 @@ export interface PurchaseInput {
   callbackUrl?: string
   waitMs: number                 // how long the agent is willing to wait for an approval, live
   preApproved?: StoredRequest    // execution of an already approved request
+  agent?: AgentChannel           // the agent's side of this request (steps); without it nothing can be paid
 }
+
+// The agent that sent the request: what its wallet holds (it says so), and how to ask it for a step
+export interface AgentChannel { walletSats: number; ask: Ask }
 
 export type PurchaseOutcome =
   | { kind: 'done'; status: number; contentType: string; body: Buffer; paidSats: number; txid?: string; refundedSats?: number; requestId?: string }
@@ -117,7 +128,7 @@ export function createPurchaseEngine(d: PurchaseDeps) {
   })
 
   // ---- Refund announced by a merchant: { refund: <BRC-29 payment> & { paymentTxid } } in a JSON answer ----
-  const handleRefund = async (body: Buffer, contentType: string, agentId: string, url: string): Promise<number | undefined> => {
+  const handleRefund = async (body: Buffer, contentType: string, agentId: string, url: string, agent?: AgentChannel): Promise<number | undefined> => {
     if (!/json/i.test(contentType)) return undefined
     let n: unknown
     try { n = JSON.parse(body.toString('utf8'))?.refund } catch { return undefined }
@@ -132,9 +143,14 @@ export function createPurchaseEngine(d: PurchaseDeps) {
       if (!orig || orig.agentId !== agentId) throw new Error('unknown payment')
       const already = all.filter(e => e.decision === 'refund' && e.refundOf === p.paymentTxid).reduce((s, e) => s + e.amountSats, 0)
       if (already + p.satoshis > orig.amountSats) throw new Error('refund larger than the payment')
-      // Checks that the output is ours and worth what is claimed, then internalizes it (the wallet verifies
-      // SPV and broadcasts it if needed): a refund that is not in our wallet is worth nothing
-      await acceptBrc29Payment(await d.agentWallet(agentId), p, undefined, `Refund of ${p.paymentTxid.slice(0, 16)}`)
+      // SPV and amount checked here; the agent's wallet checks that the output is its own and internalizes
+      // it: a refund that is not in the agent's wallet is worth nothing, so it is only booked after that
+      const tx = Transaction.fromAtomicBEEF(p.tx)
+      if (tx.outputs[p.outputIndex]?.satoshis !== p.satoshis) throw new Error('refund output does not hold the announced amount')
+      if (!(await tx.verify(await d.chainTracker()))) throw new Error('refund failed SPV verification')
+      if (!agent) throw new Error('the agent is not connected to internalize it')
+      const done = await agent.ask('refund', { url, refund: p, paymentTxid: p.paymentTxid })
+      if (done?.ok !== true || done?.txid !== p.txid) throw new Error('the agent did not internalize the refund')
       const sats = p.satoshis
       await d.record({
         agentId, url, amountSats: sats, amountEur: eur(sats), purpose: orig.purpose, decision: 'refund',
@@ -164,6 +180,17 @@ export function createPurchaseEngine(d: PurchaseDeps) {
     let reserved = 0
     let amountSats = 0
     let order: OrderInfo | undefined
+    let topup: Brc29Payment | undefined // sent to the agent's wallet for this purchase
+
+    // Every answer of the agent must be about THIS purchase: same url, same approved amount
+    const bound = (ans: any, sats: number) => {
+      if (ans?.url !== a.url || ans?.sats !== sats) throw new Error('The agent answered for another purchase (url or amount differ): refused')
+      return ans
+    }
+    const agent = () => {
+      if (!a.agent) throw new Error('The agent must complete this payment itself: it is not connected')
+      return a.agent
+    }
 
     try {
       const { response, paid } = await payFetch(a.url, {
@@ -172,14 +199,23 @@ export function createPurchaseEngine(d: PurchaseDeps) {
         headers: a.body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
         redirect: 'manual' // never follow a redirect: it could lead outside the allowed domains
       }, {
-        wallet: await d.agentWallet(a.agentId),
-        spendLock: d.payerLock,
+        spendLock: d.payerLock.for(a.agentId),
         // Allowed (policy, approval, budget): only now is the allowance spent, inside the payment lock
         beforeSpend: async () => {
-          try { await d.ensureFunds(a.agentId, amountSats, a.url) } catch (e) {
+          const ch = agent()
+          try {
+            topup = await d.ensureFunds(a.agentId, amountSats, a.url, ch.walletSats, async (tx, sighashes, info) =>
+              bound(await ch.ask('cosign-topup', { url: a.url, sats: amountSats, topup: info, tx, sighashes }), amountSats).signatures)
+          } catch (e) {
             if (e instanceof AllowanceEmpty) decision = { kind: 'deny', reason: e.message }
             throw e
           }
+        },
+        // The agent internalizes the top-up and builds the BRC-121 payment; payFetch checks output 0 = price
+        pay: async offer => {
+          if (offer.amount !== amountSats) throw new Error('Price changed during the payment: refused')
+          const ans = bound(await agent().ask('pay', { url: a.url, sats: offer.amount, server: offer.server, ...(topup ? { topup } : {}) }), offer.amount)
+          return ans.headers as PaymentHeaders
         },
         beforePay: async offer => {
           amountSats = offer.amount
@@ -230,7 +266,7 @@ export function createPurchaseEngine(d: PurchaseDeps) {
       }
       const contentType = response.headers.get('content-type') ?? 'text/plain'
       const body = Buffer.from(await response.arrayBuffer())
-      const refundedSats = await handleRefund(body, contentType, a.agentId, a.url)
+      const refundedSats = await handleRefund(body, contentType, a.agentId, a.url, a.agent)
       return { kind: 'done', status: response.status, contentType, body, paidSats: paid?.amount ?? 0, txid: paid?.txid, refundedSats, requestId }
     } catch (err) {
       if (err instanceof PendingApproval) return { kind: 'pending', request: err.request }
@@ -241,6 +277,15 @@ export function createPurchaseEngine(d: PurchaseDeps) {
         await d.record({ agentId: a.agentId, url: a.url, amountSats, amountEur: eur(amountSats), purpose: a.purpose, decision: 'allow', txid, approvedBy, order, requestId, mandateId, reason: 'paid, merchant did not deliver' })
         console.log(`⚠ ${a.agentId} paid ${fmt(eur(amountSats))} (${amountSats} sats) → ${a.url}, but the merchant did not deliver — tx ${txid}`)
         return { kind: 'refused', status: 502, decision: 'allow', reason: err.message, requestId }
+      }
+      if (topup && reserved) {
+        // The allowance already topped up the agent's wallet for this purchase, but no valid payment came
+        // back: that money is with the agent now. Keep the budget reserved and book it, so an agent cannot
+        // empty its allowance with purchases it never pays.
+        const reason = `Allowance top-up ${topup.txid} (${topup.satoshis} sats) sent to the agent wallet, but the agent did not complete the payment: ${(err as Error).message}`
+        await d.record({ agentId: a.agentId, url: a.url, amountSats, amountEur: eur(amountSats), purpose: a.purpose, decision: 'allow', action: 'topup_unspent', approvedBy, order, requestId, mandateId, reason })
+        console.log(`⚠ ${a.agentId} → ${a.url} : ${reason}`)
+        return { kind: 'refused', status: 502, decision: 'allow', reason, requestId }
       }
       if (reserved) await d.budget.release(a.agentId, reserved, order?.category) // payment failed: give the budget back
       const dec = decision && decision.kind !== 'allow' ? decision : undefined
@@ -282,15 +327,27 @@ export function createPurchaseEngine(d: PurchaseDeps) {
       finish(r, { status: 'completed', result: { status: 200, contentType: 'application/json', mandateId: m.id } }, `✅ Approved by ${r.decidedBy} · mandate ${m.id} active`)
       return
     }
-    const out = await attempt({ agentId: r.agentId, url: r.url!, method: r.method ?? 'GET', body: d.requests.body(r.id), purpose: r.purpose, waitMs: 0, preApproved: r })
-    if (out.kind === 'done') {
-      d.requests.saveResult(r.id, out.body)
-      const ok = out.status < 400
-      finish(r, { status: ok ? 'completed' : 'failed', result: { status: out.status, contentType: out.contentType, paidSats: out.paidSats, txid: out.txid, ...(ok ? {} : { error: `Service answered ${out.status}` }) } },
-        ok ? `✅ Approved by ${r.decidedBy} · paid ${fmt(eur(out.paidSats))}` : `⚠ Approved by ${r.decidedBy}, but the service answered ${out.status}`)
-    } else if (out.kind === 'refused') {
-      finish(r, { status: 'failed', result: { status: out.status, contentType: 'application/json', error: out.reason } }, `⚠ Approved by ${r.decidedBy}, but not paid: ${out.reason}`)
-    }
+    // A payment: only the agent can complete it (completeApproved), when it checks back
+  }
+
+  // ---- The agent completes an approved payment (POST /v1/requests/:id/execute) ----
+  const executing = new Set<string>()
+  async function completeApproved(r: StoredRequest, agent: AgentChannel): Promise<PurchaseOutcome> {
+    if (r.kind !== 'payment' || r.status !== 'approved') return { kind: 'refused', status: 409, decision: 'error', reason: `Request ${r.id} is ${r.status}, not an approved payment`, requestId: r.id }
+    if (executing.has(r.id)) return { kind: 'refused', status: 409, decision: 'error', reason: `Request ${r.id} is already being executed`, requestId: r.id }
+    executing.add(r.id)
+    try {
+      const out = await attempt({ agentId: r.agentId, url: r.url!, method: r.method ?? 'GET', body: d.requests.body(r.id), purpose: r.purpose, waitMs: 0, preApproved: r, agent })
+      if (out.kind === 'done') {
+        d.requests.saveResult(r.id, out.body)
+        const ok = out.status < 400
+        finish(r, { status: ok ? 'completed' : 'failed', result: { status: out.status, contentType: out.contentType, paidSats: out.paidSats, txid: out.txid, ...(ok ? {} : { error: `Service answered ${out.status}` }) } },
+          ok ? `✅ Approved by ${r.decidedBy} · paid ${fmt(eur(out.paidSats))}` : `⚠ Approved by ${r.decidedBy}, but the service answered ${out.status}`)
+      } else if (out.kind === 'refused' && out.status !== 409) {
+        finish(r, { status: 'failed', result: { status: out.status, contentType: 'application/json', error: out.reason } }, `⚠ Approved by ${r.decidedBy}, but not paid: ${out.reason}`)
+      }
+      return out
+    } finally { executing.delete(r.id) }
   }
 
   // ---- A human decision (Telegram, dashboard…) ----
@@ -310,6 +367,11 @@ export function createPurchaseEngine(d: PurchaseDeps) {
       if (r.kind === 'payment') await d.record({ agentId: r.agentId, url: r.url!, amountSats: r.amountSats ?? 0, amountEur: r.amountEur ?? 0, purpose: r.purpose, order: r.order, requestId: id, decision: 'deny', reason: `Rejected by ${by}` })
       finish(updated, {}, `❌ Rejected by ${by}`)
       return 'Rejected'
+    }
+    if (r.kind === 'payment') {
+      // The proxy cannot pay alone: the agent completes the purchase when it checks back (callback = a nudge)
+      callback(updated)
+      return 'Approved: the agent completes the purchase when it checks back'
     }
     void execute(updated).catch(e => {
       console.error(`⚠ Execution of ${id} failed:`, (e as Error).message)
@@ -403,7 +465,7 @@ export function createPurchaseEngine(d: PurchaseDeps) {
     for (const r of d.requests.list(x => x.status === 'approved')) {
       const paid = entries.find(e => e.requestId === r.id && e.decision === 'allow')
       if (paid) finish(r, { status: 'completed', result: { status: 200, contentType: 'application/json', paidSats: paid.amountSats, txid: paid.txid } }, `✅ Approved by ${r.decidedBy} · paid`)
-      else void execute(r).catch(e => console.error(`⚠ Resume of ${r.id} failed:`, (e as Error).message))
+      else if (r.kind !== 'payment') void execute(r) // payments wait for the agent.catch(e => console.error(`⚠ Resume of ${r.id} failed:`, (e as Error).message))
     }
   }
 
@@ -419,5 +481,5 @@ export function createPurchaseEngine(d: PurchaseDeps) {
     return c ? { kind: 'paid', quote: { sats: c.amount } } : { kind: 'free', status: r.status }
   }
 
-  return { attempt, decide, execute, settleInline, requestMandate, requestCard, sweep, resume, quote, usedByMandate }
+  return { attempt, completeApproved, decide, execute, settleInline, requestMandate, requestCard, sweep, resume, quote, usedByMandate }
 }
