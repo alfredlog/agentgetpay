@@ -12,11 +12,12 @@ import { JsonlLedger } from './ledger.js'
 import { TelegramNotifier, AutoNotifier, DashboardOnlyNotifier, type ApprovalNotifier } from './approval.js'
 import { RequestStore, type StoredRequest } from './requests.js'
 import { MandateStore } from './mandates.js'
-import { createPurchaseEngine } from './purchase.js'
+import { createPurchaseEngine, type AgentChannel, type PurchaseOutcome } from './purchase.js'
+import { StepBroker, type Reply } from './agent-steps.js'
 import { createCardRail, MCC_CATEGORIES } from '../card/rail.js'
 import { SimulatedIssuer, NotConfiguredIssuer } from '../card/issuer.js'
 import { AnchorLog, BsvAnchorRail, verifyAgainstChain, cachedWocFetch, FetchTxHex, Anchor } from './anchor.js'
-import { Mutex } from '../shared/mutex.js'
+import { KeyedMutex, Mutex } from '../shared/mutex.js'
 import { DatevExporter, loadAccountingConfig, monthlyStatementHtml } from './accounting.js'
 import { AgentRegistry, validateRules, validAgentId } from './registry.js'
 import { ViewerStore, validViewerName } from './viewers.js'
@@ -24,7 +25,7 @@ import { OAuthServer } from './oauth.js'
 import type { Broadcaster } from '../shared/bsv.js'
 import { openServerWallet, openChainTracker, openBroadcaster } from '../shared/wallet.js'
 import { createAllowances } from '../allowance/allowances.js'
-import { LocalAgentSigners } from '../allowance/agent-signer.js'
+import { AgentKeyStore } from '../allowance/agent-keys.js'
 import { explorerTx, wocExplorer } from '../shared/network.js'
 
 
@@ -210,13 +211,17 @@ export function createProxy(
 
   // The purchase engine: rules, mandates, approvals (even long ones), payment, refunds
   // Agent allowances: funded and reclaimed by the company (admin page, BSV Desktop), spent just in time
+  // The agents' public keys, registered by each agent's MCP server: the proxy holds no agent key
+  const agentKeys = new AgentKeyStore()
   const allowances = createAllowances({
-    policyWallet: () => policyReady, agents: new LocalAgentSigners(), chainTracker: openChainTracker, broadcaster: openBroadcaster,
-    lock: new Mutex(), eurPerSat: EUR_PER_SAT, record
+    policyWallet: () => policyReady, agentKeys: id => agentKeys.get(id), chainTracker: openChainTracker, broadcaster: openBroadcaster,
+    lock: new KeyedMutex(), eurPerSat: EUR_PER_SAT, record
   })
+  // Steps the agent completes during a purchase (co-sign the top-up, pay, internalize a refund)
+  const steps = new StepBroker()
 
   const engine = createPurchaseEngine({
-    eurPerSat: EUR_PER_SAT, policy, budget, agentWallet: id => allowances.agentWallet(id), ensureFunds: (id, sats, url) => allowances.ensureFunds(id, sats, url), payerLock: new Mutex(), ledger, record, requests, mandates,
+    eurPerSat: EUR_PER_SAT, policy, budget, ensureFunds: allowances.ensureFunds, chainTracker: openChainTracker, payerLock: new KeyedMutex(), ledger, record, requests, mandates,
     notifiers: [notifier],
     isActive: id => registry.isActive(id),
     checkTarget: (url, agentId) => checkTarget(url, registry.rulesFor(agentId)?.allowed_domains),
@@ -321,14 +326,31 @@ export function createProxy(
       }
     }
 
-    const out = await engine.attempt({ agentId: agent.id, url, method, body, purpose, callbackUrl, waitMs: waitSeconds * 1000 })
-    engine.settleInline(out)
+    // The purchase runs as one piece of work; the agent completes its steps with POST /v1/steps/:stepId
+    const reply = await steps.run(agent.id, async ask => {
+      const out = await engine.attempt({ agentId: agent.id, url, method, body, purpose, callbackUrl, waitMs: waitSeconds * 1000, agent: channel(req, ask) })
+      engine.settleInline(out)
+      return out
+    }).catch(e => ({ kind: 'done' as const, value: { kind: 'refused' as const, status: 500, decision: 'error', reason: (e as Error).message } }))
+    sendReply(res, reply)
+  })
+
+  // What the agent says its wallet holds (only the missing part of a purchase is topped up)
+  const channel = (req: express.Request, ask: AgentChannel['ask']): AgentChannel => {
+    const w = Number(req.body?.walletSats ?? 0)
+    return { walletSats: Number.isSafeInteger(w) && w >= 0 ? w : 0, ask }
+  }
+
+  // Answers the agent: a step to complete, or the purchase's outcome
+  const sendReply = (res: express.Response, reply: Reply<PurchaseOutcome>) => {
+    if (reply.kind === 'step') return res.status(202).set('X-AgentGetPay-Step', reply.step).json(reply.body)
+    const out = reply.value
     if (out.kind === 'pending') {
       const r = out.request
       return res.status(202).json({
         decision: 'pending_approval', requestId: r.id, reason: r.reason, expiresAt: r.expiresAt,
         message: `A human must approve this purchase (${r.reason}). Request ${r.id} stays open until ${r.expiresAt}. ` +
-          'Continue with other work; check GET /v1/requests/' + r.id + ' later. When it is approved, the purchase is made automatically and the result is kept for you.'
+          'Continue with other work; check GET /v1/requests/' + r.id + ' later. Once it is approved, complete it with POST /v1/requests/' + r.id + '/execute (the MCP tool check_request does it).'
       })
     }
     if (out.kind === 'refused') return res.status(out.status).json({ decision: out.decision, reason: out.reason, requestId: out.requestId })
@@ -336,6 +358,26 @@ export function createProxy(
     if (out.refundedSats) res.set('X-Refunded-Sats', String(out.refundedSats))
     if (out.requestId) res.set('X-Request-Id', out.requestId)
     res.type(out.contentType).send(out.body)
+  }
+
+  // The agent completes a step and resubmits: single use, only by the agent that started the purchase
+  app.post('/v1/steps/:stepId', async (req, res) => {
+    const agent = authAgent(req, res)
+    if (!agent) return
+    const next = steps.answer(agent.id, String(req.params.stepId), req.body)
+    if (!next) return res.status(409).json({ decision: 'error', reason: 'Unknown, expired or already used step' })
+    sendReply(res, await next.catch(e => ({ kind: 'done' as const, value: { kind: 'refused' as const, status: 500, decision: 'error', reason: (e as Error).message } })) as Reply<PurchaseOutcome>)
+  })
+
+  // The agent registers its public keys (on first start of its MCP server): allowance key and identity key
+  app.post('/v1/agent/keys', async (req, res) => {
+    const agent = authAgent(req, res)
+    if (!agent) return
+    try {
+      const r = agentKeys.register(agent.id, req.body ?? {}, allowances.view(agent.id).status === 'open')
+      if (r !== 'same') await record({ agentId: agent.id, url: `admin://agents/${agent.id}`, amountSats: 0, amountEur: 0, decision: 'admin', action: 'agent_keys', reason: r === 'new' ? 'Agent registered its wallet keys' : 'Agent registered new wallet keys' })
+      res.json({ ok: true, registered: r })
+    } catch (e) { res.status(/open allowance/.test((e as Error).message) ? 409 : 400).json({ error: (e as Error).message }) }
   })
 
   // ---- The agent's requests (long approvals) ----
@@ -350,6 +392,17 @@ export function createProxy(
     const r = requests.get(req.params.id)
     if (!r || r.agentId !== agent.id) return res.status(404).json({ error: 'Unknown request' })
     res.json(requestView(r))
+  })
+  // The agent completes an approved purchase itself (same answers as /v1/fetch, steps included)
+  app.post('/v1/requests/:id/execute', async (req, res) => {
+    const agent = authAgent(req, res)
+    if (!agent) return
+    const r = requests.get(req.params.id)
+    if (!r || r.agentId !== agent.id) return res.status(404).json({ error: 'Unknown request' })
+    if (!registry.isActive(agent.id)) return res.status(403).json({ decision: 'deny', reason: 'Agent suspended by an administrator' })
+    const reply = await steps.run(agent.id, ask => engine.completeApproved(r, channel(req, ask)))
+      .catch(e => ({ kind: 'done' as const, value: { kind: 'refused' as const, status: 500, decision: 'error', reason: (e as Error).message } }))
+    sendReply(res, reply)
   })
   // The result of the purchase executed after approval (same format as the service response)
   app.get('/v1/requests/:id/result', (req, res) => {

@@ -8,3 +8,13 @@ export class Mutex {
     return result
   }
 }
+
+// One Mutex per key (e.g. per agent): one agent's payment never waits for another agent
+export class KeyedMutex {
+  private locks = new Map<string, Mutex>()
+  for(key: string): Mutex {
+    let m = this.locks.get(key)
+    if (!m) { m = new Mutex(); this.locks.set(key, m) }
+    return m
+  }
+}
