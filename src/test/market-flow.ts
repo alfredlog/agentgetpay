@@ -9,6 +9,7 @@ import { PrivateKey } from '../shared/bsv.js'
 import { prepareMockChain } from './helpers/mockchain.js'
 import { childEnv } from './helpers/env.js'
 import { fundTestAllowance } from './helpers/company.js'
+import { agentFetch, registerTestAgent } from './helpers/agent.js'
 
 const PROXY_PORT = 5450, MARKET_PORT = 5480
 const PROXY = `http://127.0.0.1:${PROXY_PORT}`, MARKET = `http://localhost:${MARKET_PORT}`
@@ -35,10 +36,7 @@ let failures = 0
 const check = (ok: boolean, label: string) => { console.log(`${ok ? '✓' : '✗'} ${label}`); if (!ok) failures++ }
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 let key = ''
-const call = (path: string, body?: unknown, purpose = 'Market test') => fetch(`${PROXY}/v1/fetch`, {
-  method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-  body: JSON.stringify({ url: `${MARKET}${path}`, method: body ? 'POST' : 'GET', body, purpose })
-}).then(async r => ({ status: r.status, paid: Number(r.headers.get('X-Paid-Sats') ?? 0), json: await r.json().catch(() => ({})) as any }))
+const call = (path: string, body?: unknown, purpose = 'Market test') => agentFetch(PROXY, key, '/v1/fetch', 'POST', { url: `${MARKET}${path}`, method: body ? 'POST' : 'GET', body, purpose }).then(async r => ({ status: r.status, paid: Number(r.headers.get('X-Paid-Sats') ?? 0), json: await r.json().catch(() => ({})) as any }))
 const company = { street: 'Leopoldstraße 1', postalCode: '80802', city: 'München', country: 'DE' }
 const checkIn = new Date(Date.now() + 7 * 864e5).toISOString().slice(0, 10)
 
@@ -53,6 +51,7 @@ try {
     } })
   }).then(r => r.json()) as any
   key = created.apiKey
+  await registerTestAgent(PROXY, key) // the agent's MCP server registers its keys on first start
   await fundTestAllowance(PROXY, ADMIN, 'einkauf-01') // the company funds the agent's allowance (BSV Desktop stand-in)
 
   const cat = await call('/api')

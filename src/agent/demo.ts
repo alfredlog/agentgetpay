@@ -1,13 +1,13 @@
 // An "agent" that calls the paid API and pays by itself (BRC-121), without the proxy.
-// It uses the agent's own wallet (data/agents/<id>/, created by the proxy): do not run it while the proxy runs.
+// It uses the agent's own wallet (mcp-data/agents/<id>/, the MCP server's): do not run it while that MCP server runs.
 // The wallet only holds what an allowance top-up gave it (see src/allowance).
 import 'dotenv/config'
 import { payFetch } from './pay-fetch.js'
-import { LocalAgentSigners } from '../allowance/agent-signer.js'
+import { LocalAgentWallets } from '../allowance/agent-signer.js'
 import { explorerTx } from '../shared/network.js'
 
 const url = process.argv[2] ?? 'http://localhost:4000/api/quote'
-const wallet = await new LocalAgentSigners().get(process.argv[3] ?? process.env.AGENT_ID ?? 'demo-agent').wallet()
+const wallet = await new LocalAgentWallets().get(process.argv[3] ?? process.env.AGENT_ID ?? 'demo-agent').wallet()
 
 const { response, paid } = await payFetch(url, { method: 'GET' }, { wallet, maxSats: 1000 })
 

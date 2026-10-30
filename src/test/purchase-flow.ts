@@ -1,6 +1,6 @@
 // Test of the purchase policy: daily/monthly budgets, categories, price per unit, delivery addresses.
 // Fake wallet, fake blockchain, demo shops: nothing is paid, nothing on your machine is touched.
-import { mkdtempSync, cpSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, cpSync, writeFileSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawn, ChildProcess } from 'node:child_process'
@@ -10,6 +10,7 @@ import { PrivateKey, Beef, Utils } from '../shared/bsv.js'
 import { prepareMockChain } from './helpers/mockchain.js'
 import { childEnv } from './helpers/env.js'
 import { fundTestAllowance } from './helpers/company.js'
+import { agentClient, agentFetch, agentSideDir, registerTestAgent } from './helpers/agent.js'
 
 const PROXY_PORT = 5350, SELLER_PORT = 5390
 const PROXY = `http://127.0.0.1:${PROXY_PORT}`, SHOP = `http://localhost:${SELLER_PORT}`
@@ -42,10 +43,7 @@ const admin = (path: string, method = 'GET', body?: unknown) => fetch(`${PROXY}/
   method, headers: { 'X-Admin-Token': ADMIN, 'X-Admin-Name': 'Test admin', 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined
 }).then(r => r.json())
 let key = ''
-const buy = (path: string, body: unknown, purpose = 'Test purchase') => fetch(`${PROXY}/v1/fetch`, {
-  method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-  body: JSON.stringify({ url: `${SHOP}${path}`, method: 'POST', body, purpose })
-}).then(async r => ({ status: r.status, json: await r.json().catch(() => ({})) as any }))
+const buy = (path: string, body: unknown, purpose = 'Test purchase') => agentFetch(PROXY, key, '/v1/fetch', 'POST', { url: `${SHOP}${path}`, method: 'POST', body, purpose }).then(async r => ({ status: r.status, json: await r.json().catch(() => ({})) as any }))
 
 // A merchant that takes the payment but never delivers: every answer is a fresh 402 (BRC-121 challenge)
 const BROKEN_PORT = 5396
@@ -69,6 +67,7 @@ try {
   await waitUp()
   const created = await admin('/agents', 'POST', { id: 'einkauf-test', rules })
   key = created.apiKey
+  await registerTestAgent(PROXY, key) // the agent's MCP server registers its keys on first start
   await fundTestAllowance(PROXY, ADMIN, 'einkauf-test') // the company funds the agent's allowance (BSV Desktop stand-in)
   check(!!key, 'Purchasing agent created with categories, monthly budget and a delivery address')
   const bad = await admin('/agents/einkauf-test', 'PUT', { rules: { ...rules, monthly_budget_eur: 100 } })
@@ -117,10 +116,7 @@ try {
   check(s?.monthlyBudgetEur === 500 && Math.abs(s.spentMonthEur - 250) < 0.001, 'Dashboard shows the monthly budget and what was spent')
 
   // Paid, but the merchant answers a fresh 402: the ledger keeps the payment (txid) and the budget stays spent
-  const nd = await fetch(`${PROXY}/v1/fetch`, {
-    method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url: `http://localhost:${BROKEN_PORT}/api/broken`, method: 'GET', purpose: 'Broken merchant' })
-  }).then(async r => ({ status: r.status, json: await r.json().catch(() => ({})) as any }))
+  const nd = await agentFetch(PROXY, key, '/v1/fetch', 'POST', { url: `http://localhost:${BROKEN_PORT}/api/broken`, method: 'GET', purpose: 'Broken merchant' }).then(async r => ({ status: r.status, json: await r.json().catch(() => ({})) as any }))
   check(nd.status === 502 && /did not deliver/.test(nd.json.reason ?? ''), `Fresh 402 after payment: the agent is told it paid but got nothing (${nd.status})`)
   const ndLedger = await fetch(`${PROXY}/v1/ledger`).then(x => x.json()) as any[]
   const ndEntry = ndLedger.find(e => e.url?.includes(`:${BROKEN_PORT}/`) && e.action !== 'allowance_topup') // the top-up has its own entry
@@ -129,6 +125,47 @@ try {
   check(!ndLedger.some(e => e.url?.includes(`:${BROKEN_PORT}/`) && e.decision === 'error'), 'No error entry without txid')
   const me2 = await fetch(`${PROXY}/v1/me`, { headers: { Authorization: `Bearer ${key}` } }).then(x => x.json()) as any
   check(Math.abs(me2.spentMonthEur - 255) < 0.001, `The budget stays spent (€${me2.spentMonthEur})`)
+
+  // The agent's key lives on the agent's side only: the proxy's folder holds no agent key file
+  const files = (d: string): string[] => readdirSync(d, { withFileTypes: true }).flatMap(e => e.isDirectory() ? files(join(d, e.name)) : [join(d, e.name)])
+  check(!files(dir).some(f => /root\.key$|agent_.*\.sqlite|[\\/]agents[\\/]/.test(f)) && files(agentSideDir).some(f => f.endsWith(join('einkauf-test', 'root.key'))),
+    'The proxy process holds NO agent key file or agent wallet (they are on the agent\'s side)')
+  const registered = JSON.parse(readFileSync(join(dir, 'data/agent-keys.json'), 'utf8'))['einkauf-test']
+  check(Object.keys(registered).sort().join() === 'allowancePubKey,identityKey,registeredAt', 'The proxy only knows the agent\'s public keys')
+
+  // A forged agent signature on the top-up: refused, nothing is broadcast, the budget is given back
+  const pens = { url: `${SHOP}/api/office/order`, method: 'POST', body: { items: [{ sku: 'pens', quantity: 1 }], shipTo: company }, purpose: 'Pens' }
+  const allowanceOf = async () => (await admin('/allowances/einkauf-test')).balanceSats as number
+  let left = await allowanceOf()
+  const forger = agentClient(PROXY, key, { tamper: async (step, complete) => {
+    const ans = await complete(step)
+    return step.step === 'cosign-topup' ? { ...ans, signatures: ans.signatures.map(() => PrivateKey.fromRandom().sign([1, 2, 3]).toDER('hex')) } : ans
+  } })
+  let t = await forger.call('/v1/fetch', 'POST', pens).then(async x => ({ status: x.status, json: await x.json() as any }))
+  check(t.status === 502 && /Invalid agent signature/.test(t.json.reason) && await allowanceOf() === left, `A forged agent signature is refused, the allowance is untouched (${t.json.reason})`)
+  const me3 = await fetch(`${PROXY}/v1/me`, { headers: { Authorization: `Bearer ${key}` } }).then(x => x.json()) as any
+  check(Math.abs(me3.spentMonthEur - 255) < 0.001, 'Nothing was spent: the budget is given back')
+
+  // An answer for another amount: refused before anything is broadcast
+  const other = agentClient(PROXY, key, { tamper: async (step, complete) => step.step === 'cosign-topup' ? { ...await complete(step), sats: step.sats + 1 } : complete(step) })
+  t = await other.call('/v1/fetch', 'POST', pens).then(async x => ({ status: x.status, json: await x.json() as any }))
+  check(t.status === 502 && /answered for another purchase/.test(t.json.reason) && await allowanceOf() === left, 'A step answer with a changed amount is refused')
+
+  // A replayed step: refused
+  let replay: { stepId: string; answer: unknown } | undefined
+  const recorder = agentClient(PROXY, key, { tamper: async (step, complete) => { const ans = await complete(step); if (step.step === 'pay') replay = { stepId: step.stepId, answer: ans }; return ans } })
+  t = await recorder.call('/v1/fetch', 'POST', pens).then(async x => ({ status: x.status, json: await x.json() as any }))
+  check(t.status === 200 && /^BW-/.test(t.json.order) && !!replay, 'With honest answers the same purchase goes through')
+  const again = await fetch(`${PROXY}/v1/steps/${replay!.stepId}`, { method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, body: JSON.stringify(replay!.answer) })
+  check(again.status === 409, 'A replayed step is refused')
+
+  // A payment of another amount (the agent's wallet pays 100 sats less, the answer claims the approved amount)
+  const cheat = agentClient(PROXY, key, { tamper: async (step, complete) => step.step === 'pay' ? { ...await complete({ ...step, sats: step.sats - 100 }), sats: step.sats } : complete(step) })
+  left = await allowanceOf()
+  t = await cheat.call('/v1/fetch', 'POST', pens).then(async x => ({ status: x.status, json: await x.json() as any }))
+  check(t.status === 502 && /not the approved/.test(t.json.reason), `A payment of a changed amount is refused (${t.json.reason?.slice(0, 120)})`)
+  const unspent = (await fetch(`${PROXY}/v1/ledger`).then(x => x.json()) as any[]).filter(e => e.action === 'topup_unspent')
+  check(unspent.length === 1 && unspent[0].decision === 'allow' && !unspent[0].txid && await allowanceOf() < left, 'The top-up it received is booked against its budget (it cannot drain the allowance this way)')
 
   // Rules saved on disk
   const saved = JSON.parse(readFileSync(join(dir, 'config/policies.json'), 'utf8'))['einkauf-test']

@@ -10,6 +10,7 @@ import { PrivateKey } from '../shared/bsv.js'
 import { prepareMockChain } from './helpers/mockchain.js'
 import { childEnv } from './helpers/env.js'
 import { fundTestAllowance } from './helpers/company.js'
+import { agentFetch, registerTestAgent } from './helpers/agent.js'
 
 const PROXY_PORT = 5550, MARKET_PORT = 5580, HOOK_PORT = 5590
 const PROXY = `http://127.0.0.1:${PROXY_PORT}`, MARKET = `http://localhost:${MARKET_PORT}`
@@ -47,9 +48,7 @@ const adminCall = (path: string, method = 'GET', body?: unknown) => fetch(`${PRO
   method, headers: { 'X-Admin-Token': ADMIN, 'X-Admin-Name': 'Alfred', 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined
 }).then(async r => ({ status: r.status, json: await r.json().catch(() => ({})) as any }))
 let key = ''
-const agent = (path: string, method = 'GET', body?: unknown) => fetch(`${PROXY}${path}`, {
-  method, headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined
-}).then(async r => ({ status: r.status, headers: r.headers, json: await r.json().catch(() => ({})) as any }))
+const agent = (path: string, method = 'GET', body?: unknown) => agentFetch(PROXY, key, path, method, body).then(async r => ({ status: r.status, headers: r.headers, json: await r.json().catch(() => ({})) as any }))
 const buy = (path: string, body: unknown, extra: Record<string, unknown> = {}) =>
   agent('/v1/fetch', 'POST', { url: `${MARKET}${path}`, method: 'POST', body, purpose: 'Approval test', ...extra })
 const until = async (fn: () => Promise<boolean>, ms = 8000) => { for (let t = 0; t < ms; t += 200) { if (await fn()) return true; await sleep(200) } return false }
@@ -64,6 +63,7 @@ try {
     categories: { 'travel.hotel': { max_unit_price_eur: 150 }, 'office.supplies': { max_unit_price_eur: 50 }, software: { approval_above_eur: 0 } },
     shipping_addresses: [company]
   } })).json.apiKey
+  await registerTestAgent(PROXY, key) // the agent's MCP server registers its keys on first start
   await fundTestAllowance(PROXY, ADMIN, 'einkauf-01') // the company funds the agent's allowance (BSV Desktop stand-in)
 
   // 1. An approval that takes time: the agent does not wait
@@ -82,10 +82,15 @@ try {
   let stats = (await adminCall('/v1/stats')).json
   check(stats.pending.some((p: any) => p.id === id && p.order?.merchant === 'City Lodge München'), 'After a restart the request is still waiting on the dashboard')
 
-  // 4. A human approves later: the purchase happens by itself
+  // 4. A human approves later: the agent completes the purchase with its own wallet (the proxy cannot pay alone)
   const ok = await adminCall(`/v1/admin/approvals/${id}`, 'POST', { approve: true })
-  check(ok.status === 200 && /executing/.test(ok.json.message), 'Admin approves on the dashboard: the purchase runs in the background')
-  check(await until(async () => (await agent(`/v1/requests/${id}`)).json.status === 'completed'), 'The request becomes completed')
+  check(ok.status === 200 && /agent completes the purchase/.test(ok.json.message), 'Admin approves on the dashboard: the agent is asked to complete the purchase')
+  check(await until(async () => hooks.some(h => h.requestId === id && h.status === 'approved')), 'The agent\'s callback address is told it was approved')
+  check((await agent(`/v1/requests/${id}`)).json.status === 'approved', 'Until the agent checks back, the request is approved, not paid')
+  const exec = await agent(`/v1/requests/${id}/execute`, 'POST', {})
+  check(exec.status === 200 && /^TR-/.test(exec.json.confirmation), 'The agent completes the approved purchase (check_request does this in the MCP)')
+  check((await agent(`/v1/requests/${id}`)).json.status === 'completed', 'The request becomes completed')
+  check((await agent(`/v1/requests/${id}/execute`, 'POST', {})).status === 409, 'A completed request cannot be executed again')
   const res = await agent(`/v1/requests/${id}/result`)
   const booking = res.json.confirmation
   check(res.status === 200 && /^TR-/.test(booking) && res.headers.get('X-Paid-Sats') === '17800', `The agent picks up the result later: booking ${booking}, 17800 sats paid`)

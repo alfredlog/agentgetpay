@@ -6,7 +6,7 @@ set -euo pipefail
 cd /app
 
 STATE=/app/state
-mkdir -p "$STATE/config" "$STATE/data" "$STATE/workspace"
+mkdir -p "$STATE/config" "$STATE/data" "$STATE/workspace" "$STATE/mcp-data"
 touch "$STATE/.env"
 
 # Copy the default rules once; services.json is part of the code, so it is refreshed on every start
@@ -45,7 +45,8 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 
-$TSX src/mcp/server.ts & pids+=($!)
+# The agents' wallets belong to the MCP server, in its own folder (never in the proxy's data/)
+MCP_DATA_DIR="$STATE/mcp-data" $TSX src/mcp/server.ts & pids+=($!)
 $TSX src/market/server.ts & pids+=($!)
 
 echo "AgentGetPay is running:"

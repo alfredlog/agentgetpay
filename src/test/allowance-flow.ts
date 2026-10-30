@@ -1,18 +1,21 @@
 // Offline test of agent allowances on wallet-toolbox's mock chain. A wallet-toolbox wallet stands in
-// for BSV Desktop (same WalletInterface). Proves: funding; a purchase triggers a top-up and a BRC-121
-// payment; the agent key alone and the policy key alone cannot spend the allowance; the company can
-// reclaim; an empty allowance is refused.
+// for BSV Desktop (same WalletInterface). Proves: funding; a purchase triggers a top-up (checked and
+// co-signed by the agent's own wallet) and a BRC-121 payment; the agent refuses to co-sign a top-up that
+// sends the allowance elsewhere; the agent key alone and the policy key alone cannot spend the allowance;
+// the company can reclaim; an empty allowance is refused.
 import express from 'express'
 import type { Server } from 'node:http'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { P2PKH, PrivateKey, Transaction, Utils } from '../shared/bsv.js'
-import { Mutex } from '../shared/mutex.js'
+import { KeyedMutex } from '../shared/mutex.js'
 import { spendableSats } from '../shared/wallet.js'
+import { acceptBrc29Payment } from '../shared/payments.js'
 import { openMockChain } from './helpers/mockchain.js'
-import { createAllowances, AllowanceEmpty } from '../allowance/allowances.js'
-import { LocalAgentSigners } from '../allowance/agent-signer.js'
+import { createAllowances, AllowanceEmpty, type Cosign } from '../allowance/allowances.js'
+import { LocalAgentWallets, agentRegistration, cosignTopup, type AgentSigner } from '../allowance/agent-signer.js'
+import { AgentKeyStore } from '../allowance/agent-keys.js'
 import { fundAllowance, reclaimAllowance, type AdminApi } from '../allowance/company.js'
 import { AllowanceScript, policyKeyId, walletSigner } from '../allowance/script.js'
 import { createSeller } from '../shared/seller-kit.js'
@@ -30,13 +33,22 @@ const company = await chain.makeWallet()      // stands in for BSV Desktop
 await chain.fund(company, 500_000)
 const policy = await chain.makeWallet()
 const merchant = await chain.makeWallet()
-const agents = new LocalAgentSigners(join(dir, 'agents'))
+const agents = new LocalAgentWallets(join(dir, 'agent-side')) // the agent's side (its MCP server)
+const agentKeys = new AgentKeyStore(join(dir, 'agent-keys.json')) // the proxy's side: public keys only
 const ledger: any[] = []
 const allowances = createAllowances({
-  file: join(dir, 'allowances.json'), policyWallet: async () => policy, agents,
+  file: join(dir, 'allowances.json'), policyWallet: async () => policy, agentKeys: id => agentKeys.get(id),
   chainTracker: async () => chain.chainTracker, broadcaster: async () => chain.broadcaster,
-  lock: new Mutex(), eurPerSat: 0.01, record: async e => { ledger.push(e) }
+  lock: new KeyedMutex(), eurPerSat: 0.01, record: async e => { ledger.push(e) }
 })
+// The agent checks and co-signs; then its wallet internalizes the top-up (what proxy-client.ts does)
+const cosignAs = (s: AgentSigner, sats: number): Cosign => (tx, _hashes, topup) => cosignTopup(s, { tx, topup, sats })
+const topUp = async (id: string, sats: number, url: string, cosign?: Cosign) => {
+  const s = agents.get(id), w = await s.wallet()
+  const t = await allowances.ensureFunds(id, sats, url, await spendableSats(w), cosign ?? cosignAs(s, sats))
+  if (t) await acceptBrc29Payment(w, t, chain.chainTracker, 'Allowance top-up')
+  return t
+}
 // The admin API, as the admin page calls it (here without HTTP)
 const api: AdminApi = async (path, _method = 'GET', body?: any) => {
   const [, , id, op] = path.split('/')
@@ -55,6 +67,12 @@ const server: Server = await new Promise(r => { const s = app.listen(0, '127.0.0
 const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/api/report`
 
 try {
+  // 0. The agent registers its public keys (proof: signed by its allowance key)
+  const reg = await agentRegistration(agents.get('agent-a'))
+  const forged = (() => { try { agentKeys.register('agent-a', { ...reg, proof: reg.proof.replace(/.$/, c => c === '0' ? '1' : '0') }, false); return false } catch { return true } })()
+  check(forged, 'A key registration with a wrong proof is refused')
+  check(agentKeys.register('agent-a', reg, false) === 'new' && agentKeys.register('agent-a', reg, false) === 'same', 'The agent registers its allowance and identity keys')
+
   // 1. Funding by the company
   const companyBefore = await spendableSats(company)
   const v = await fundAllowance(company, api, 'agent-a', 20_000)
@@ -67,10 +85,18 @@ try {
   check(wrong, 'A malformed funding is refused')
 
   // 2. A purchase: top-up just in time, then a BRC-121 payment from the agent wallet
-  const agentWallet = await allowances.agentWallet('agent-a')
+  const agentWallet = await agents.get('agent-a').wallet()
   check(await spendableSats(agentWallet) === 0, 'The agent wallet starts empty')
+
+  // A top-up that sends the allowance elsewhere: the agent refuses to co-sign it, nothing is broadcast
+  const evil: Cosign = (tx, h, topup) => cosignTopup(agents.get('agent-a'), { tx: { ...tx, outputs: [tx.outputs[0], { satoshis: tx.outputs[1].satoshis, lockingScript: new P2PKH().lock(PrivateKey.fromRandom().toAddress()).toHex() }] }, topup, sats: 3000 })
+  const refused = await topUp('agent-a', 3000, url, evil).then(() => undefined, e => e as Error)
+  check(/sends allowance money elsewhere/.test(refused?.message ?? '') && allowances.view('agent-a').balanceSats === 20_000, 'The agent refuses to co-sign a top-up that sends the change elsewhere')
+  const greedy = await topUp('agent-a', 3000, url, (tx, h, topup) => cosignTopup(agents.get('agent-a'), { tx, topup, sats: 100 })).then(() => undefined, e => e as Error)
+  check(/exceeds the price/.test(greedy?.message ?? ''), 'The agent refuses a top-up larger than the price plus the fee buffer')
+
   const merchantBefore = await spendableSats(merchant)
-  const r = await payFetch(url, {}, { wallet: agentWallet, beforePay: async () => true, beforeSpend: async o => { await allowances.ensureFunds('agent-a', o.amount, url) } })
+  const r = await payFetch(url, {}, { wallet: agentWallet, beforePay: async () => true, beforeSpend: async o => { await topUp('agent-a', o.amount, url) } })
   check(r.response.status === 200 && r.paid?.amount === 3000, 'The purchase is paid with BRC-121')
   check(await spendableSats(merchant) === merchantBefore + 3000, 'The merchant is credited')
   const topup = ledger.find(e => e.action === 'allowance_topup')
@@ -96,9 +122,9 @@ try {
   check(!(await spendWith(policySigner, policySigner)), 'The policy key alone cannot spend the allowance')
 
   // 4. An allowance too small for the purchase is refused
-  const big = await allowances.ensureFunds('agent-a', 1_000_000, url).then(() => undefined, e => e as Error)
+  const big = await topUp('agent-a', 1_000_000, url).then(() => undefined, e => e as Error)
   check(big instanceof AllowanceEmpty && /allowance empty: ask the company to top up/.test(big.message), 'Allowance too small: refused with a clear reason')
-  const none = await allowances.ensureFunds('agent-b', 1000, url).then(() => undefined, e => e as Error)
+  const none = await topUp('agent-b', 1000, url).then(() => undefined, e => e as Error)
   check(none instanceof AllowanceEmpty, 'No allowance at all: refused')
 
   // 5. The company reclaims what is left
@@ -109,7 +135,7 @@ try {
   const gain = await spendableSats(company) - companyMid
   check(gain > left - 200 && gain <= left, `The money is back in the company wallet (+${gain} of ${left} sats)`)
   check(ledger.some(e => e.action === 'allowance_reclaim' && e.amountSats === left && !!e.txid), 'Reclaim recorded with its txid')
-  const again = await allowances.ensureFunds('agent-a', 3000, url).then(() => undefined, e => e as Error)
+  const again = await topUp('agent-a', 3000, url).then(() => undefined, e => e as Error)
   check(again instanceof AllowanceEmpty, 'After the reclaim, purchases are refused')
 } catch (e) {
   console.error(e); failures++

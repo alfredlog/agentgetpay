@@ -1,6 +1,7 @@
-// Offline test proxy: fake P2PKH wallet and fake chain for the audit-log anchors. The policy wallet and
-// the agent wallets (allowances, BRC-121 payments, BRC-29 refunds) are real wallet-toolbox wallets on the
-// shared mock chain (MOCK_CHAIN_DB); the test runner funds the allowances as the company would.
+// Offline test proxy: fake P2PKH wallet and fake chain for the audit-log anchors. The policy wallet is a
+// real wallet-toolbox wallet on the shared mock chain (MOCK_CHAIN_DB). The agent wallets are NOT in this
+// process: the test runner holds them on the agent's side (helpers/agent.ts), registers their keys and
+// funds the allowances as the company would.
 import 'dotenv/config'
 import { PrivateKey, Transaction, P2PKH, Broadcaster } from '../shared/bsv.js'
 import { addressNetwork } from '../shared/network.js'
