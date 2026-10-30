@@ -1,5 +1,5 @@
 // Offline test of BRC-121 end to end, in one process: wallet-toolbox's mock chain, a merchant
-// wallet behind the seller kit, a payer wallet behind payFetch, and a BRC-29 refund.
+// wallet behind the seller kit, an agent (payer) wallet behind payFetch, and a BRC-29 refund.
 import express from 'express'
 import type { Server } from 'node:http'
 import { openMockChain } from './helpers/mockchain.js'

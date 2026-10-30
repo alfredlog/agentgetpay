@@ -128,6 +128,24 @@ For each agent you can change the daily budget, the maximum per payment, the app
 
 Every change is written to the audit log with the name of the person who made it, and sealed on BSV like the payments. New API keys are shown once and only their hash is stored.
 
+### Agent allowances: the company's money stays on chain
+
+The company's money does not sit in a server wallet. Each agent spends from its own **allowance**: an on-chain output locked to a script that no single key controls (`src/allowance/script.ts`):
+
+```
+OP_IF   <agentPub> OP_CHECKSIGVERIFY <policyPub> OP_CHECKSIG     agent AND proxy policy
+OP_ELSE <companyPub> OP_CHECKSIG                                 the company alone
+OP_ENDIF
+```
+
+- `companyPub` is a derived key of the company's BSV Desktop wallet (protocol `[1, 'agentgetpay allowance']`, key `agent-<agentId>`), never its identity key. `policyPub` belongs to the proxy's policy wallet (`POLICY_ROOT_KEY`, created once in `.env`). `agentPub` belongs to the agent's own wallet, which also pays merchants (BRC-121).
+- **Funding:** on the admin page, enter an amount and click **Fund from BSV Desktop**. BSV Desktop creates the output; the proxy checks the script and the amount, verifies the transaction by SPV (Arcade headers) and stores it in `data/allowances.json`. The page's wallet code is bundled with `npm run build:web` into `public/allowance.js` (no CDN).
+- **Spending, just in time:** only after a purchase passes the policy (and a human approval if needed), the proxy spends the allowance: a BRC-29 payment of the price plus a small fee buffer to the agent's wallet, change back to the same script. Agent and policy both sign; the transaction goes out through Arcade (Extended Format); the agent's wallet then pays the merchant with BRC-121. If the allowance is too small, the purchase is refused: *allowance empty: ask the company to top up*.
+- **Reclaim:** **Reclaim to BSV Desktop** spends the whole allowance back into the company's wallet with the company key alone; the proxy marks it closed.
+- The dashboard shows each agent's allowance; funding, top-ups and reclaims are in the audit log with their transaction ids. Test: `npm run test:allowance`.
+
+> **Limitation of this version:** the agent's signing key (`AgentSigner`, `src/allowance/agent-signer.ts`) still runs inside the proxy process, with one key file and one wallet per agent under `data/agents/`. Whoever controls the proxy host can therefore use both the agent key and the policy key. A later version moves the agent signer to the agent side (MCP server), so that the proxy alone can no longer spend an allowance. The company's reclaim key is never on the server.
+
 ### Purchase policy (services, travel, goods)
 
 Merchants can describe what they sell in the 402 offer (`extensions.order`: merchant, category, items with unit prices, delivery address). AgentGetPay then applies the company's purchase policy before paying, like a purchasing department would:
@@ -238,6 +256,8 @@ The ports are published on `127.0.0.1` only, so the proxy stays private to that 
 | `npm run test:market` | Test the demo market through the proxy, offline |
 | `npm run test:card` | Test the simulated card rail (virtual cards, real-time authorization), offline |
 | `npm run test:approval` | Test long approvals, refunds and mandates, offline |
+| `npm run build:web` | Bundle the admin page's BSV Desktop code into `public/allowance.js` |
+| `npm run test:allowance` | Test agent allowances (funding, top-up, keys alone cannot spend, reclaim), offline |
 | `npm run test:purchase` | Test the purchase policy (budgets, categories, delivery addresses), offline |
 | `npm run test:local`, `npm run test:proxy` | Offline tests with a fake wallet |
 
